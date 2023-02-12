@@ -1,48 +1,79 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+)
 
-
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-//
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
-//
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+
+	// 1. worker send rpc to request a task
+	// 2. get file name from coordinator
+	// 3. call the mapf function as in mrsequential.go
+
+	intermediate := []KeyValue{}
+
+	// declare an argument structure.
+	args := ExampleArgs{}
+
+	// declare a reply structure.
+	reply := ExampleReply{}
+
+	// send the RPC request, wait for the reply.
+	// the "Coordinator.Example" tells the
+	// receiving server that we'd like to call
+	// the Example() method of struct Coordinator.
+	ok := call("Coordinator.GetFileName", &args, &reply)
+
+	if ok {
+		fmt.Printf("reply.FileName %v\n", reply.FileName)
+	} else {
+		fmt.Printf("call failed!\n")
+	}
+
+	file, err := os.Open(reply.FileName)
+	if err != nil {
+		log.Fatalf("cannot open %v", reply.FileName)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", reply.FileName)
+	}
+	file.Close()
+	kva := mapf(reply.FileName, string(content))
+	intermediate = append(intermediate, kva...)
+
+	fmt.Println("intermediate result", intermediate)
 
 }
 
-//
 // example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
 func CallExample() {
 
 	// declare an argument structure.
@@ -62,16 +93,15 @@ func CallExample() {
 	if ok {
 		// reply.Y should be 100.
 		fmt.Printf("reply.Y %v\n", reply.Y)
+		fmt.Printf("reply.FileName %v\n", reply.FileName)
 	} else {
 		fmt.Printf("call failed!\n")
 	}
 }
 
-//
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
