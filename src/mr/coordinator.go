@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -10,7 +11,7 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-
+	FileNames chan string
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -39,9 +40,27 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+func (c *Coordinator) PutFilesToChannel() chan string {
+	ch := make(chan string)
+	for _, filename := range os.Args[2:] {
+		go func(f string) {
+			ch <- f
+		}(filename)
+	}
+	return ch
+}
+
 func (c *Coordinator) GetFileName(args *ExampleArgs, reply *ExampleReply) error {
-	reply.FileName = os.Args[2]
+	// file name should be received from the channel
+	select {
+	case filename := <-c.FileNames:
+		fmt.Println(filename)
+		reply.FileName = <-c.FileNames
+	default:
+		fmt.Println("chan no data")
+	}
 	return nil
+
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -73,6 +92,7 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
+	c.FileNames = c.PutFilesToChannel()
 
 	// Your code here.
 
