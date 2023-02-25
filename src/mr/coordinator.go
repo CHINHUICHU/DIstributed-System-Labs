@@ -1,17 +1,31 @@
 package mr
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	FileNames chan string
+	FileNames      chan File
+	NMap           int
+	NReduce        int
+	ReduceNumbers  chan int
+	NMapTask       int
+	MapTaskLock    sync.Mutex
+	NReduceTask    int
+	ReduceTaskLock sync.Mutex
+}
+
+type File struct {
+	Name  string
+	Index int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -19,47 +33,74 @@ type Coordinator struct {
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
 
-	// for _, filename := range os.Args[2:] {
-	// 	file, err := os.Open(filename)
-	// 	if err != nil {
-	// 		log.Fatalf("cannot open %v", filename)
-	// 	}
-	// 	content, err := ioutil.ReadAll(file)
-	// 	if err != nil {
-	// 		log.Fatalf("cannot read %v", filename)
-	// 	}
-	// 	file.Close()
-	// 	kva := mapf(filename, string(content))
-	// 	intermediate = append(intermediate, kva...)
-	// }
-
-	reply.FileName = os.Args[2]
-	return nil
-}
-
-func (c *Coordinator) PutFilesToChannel() chan string {
-	ch := make(chan string)
-	for _, filename := range os.Args[2:] {
-		go func(f string) {
-			ch <- f
-		}(filename)
+func (c *Coordinator) putFilesToChannel() chan File {
+	ch := make(chan File)
+	for index, filename := range os.Args[1:] {
+		go func(f string, i int) {
+			ch <- File{f, i}
+		}(filename, index)
+		c.NMap += 1
 	}
 	return ch
 }
 
-func (c *Coordinator) GetFileName(args *ExampleArgs, reply *ExampleReply) error {
+func (c *Coordinator) GetInitialData(args *RpcArgs, reply *RpcReply) error {
 	// file name should be received from the channel
 	select {
-	case filename := <-c.FileNames:
-		fmt.Println(filename)
-		reply.FileName = <-c.FileNames
+	case file := <-c.FileNames:
+		fmt.Println(file.Name)
+		reply.FileName = file.Name
+		reply.MapNumber = file.Index
+		reply.NReduce = c.NReduce
+		reply.NMap = c.NMap
+		return nil
 	default:
-		fmt.Println("chan no data")
+		return errors.New("no more file")
+	}
+}
+
+func (c *Coordinator) generateReduceNumber(nReduce int) chan int {
+	ch := make(chan int)
+	for i := 0; i < nReduce; i += 1 {
+		go func(i int) {
+			ch <- i
+		}(i)
+	}
+	return ch
+}
+
+func (c *Coordinator) MapNotify(args *RpcArgs, reply *RpcReply) error {
+	c.MapTaskLock.Lock()
+	if c.NMapTask <= 0 {
+		return errors.New("mapper notify finished")
+	}
+	c.NMapTask -= 1
+	c.MapTaskLock.Unlock()
+	return nil
+
+}
+
+func (c *Coordinator) StartReduce(args *RpcArgs, reply *RpcReply) error {
+	if c.NMapTask == 0 {
+		reply.StartReduce = true
+	} else {
+		reply.StartReduce = false
 	}
 	return nil
+}
+
+func (c *Coordinator) GetReduceNumber(args *RpcArgs, reply *RpcReply) error {
+	select {
+	case n := <-c.ReduceNumbers:
+		c.ReduceTaskLock.Lock()
+		reply.ReduceNumber = n
+		c.NReduceTask -= 1
+		c.ReduceTaskLock.Unlock()
+		return nil
+	default:
+		return errors.New("no reduce task left")
+	}
 
 }
 
@@ -82,7 +123,13 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	ret := false
 
-	// Your code here.
+	// periodically, check if the NReduceTask equals to 0
+	// if so, return true
+	c.ReduceTaskLock.Lock()
+	if c.NReduceTask == 0 {
+		ret = true
+	}
+	c.ReduceTaskLock.Unlock()
 
 	return ret
 }
@@ -92,9 +139,12 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
-	c.FileNames = c.PutFilesToChannel()
-
-	// Your code here.
+	c.NMap = 0
+	c.FileNames = c.putFilesToChannel()
+	c.NReduce = nReduce
+	c.ReduceNumbers = c.generateReduceNumber(nReduce)
+	c.NMapTask = c.NMap * c.NReduce
+	c.NReduceTask = c.NReduce
 
 	c.server()
 	return &c

@@ -7,7 +7,6 @@ package mr
 //
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 )
@@ -17,13 +16,17 @@ import (
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
-	X int
+type RpcArgs struct {
 }
 
-type ExampleReply struct {
-	Y        int
-	FileName string
+// need default value
+type RpcReply struct {
+	FileName     string
+	MapNumber    int
+	NMap         int
+	NReduce      int
+	ReduceNumber int
+	StartReduce  bool
 }
 
 // Add your RPC definitions here.
@@ -36,7 +39,7 @@ type ExampleReply struct {
 func coordinatorSock() string {
 	s := "/var/tmp/5840-mr-"
 	s += strconv.Itoa(os.Getuid())
-	fmt.Println("coordinator sock", s)
+	// fmt.Println("coordinator sock", s)
 
 	return s
 }
