@@ -93,6 +93,7 @@ func (c *Coordinator) ReduceNotify(args *RpcArgs, reply *RpcReply) error {
 }
 
 func (c *Coordinator) DoReduceTask(args *RpcArgs, reply *RpcReply) error {
+	c.MapTaskLock.Lock()
 	if c.NMapTask == 0 {
 		reply.StartReduce = true
 		select {
@@ -105,6 +106,7 @@ func (c *Coordinator) DoReduceTask(args *RpcArgs, reply *RpcReply) error {
 		}
 	}
 	reply.StartReduce = false
+	c.MapTaskLock.Unlock()
 	return nil
 
 }
