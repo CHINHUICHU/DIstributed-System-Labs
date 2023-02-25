@@ -21,6 +21,7 @@ type Coordinator struct {
 	MapTaskLock    sync.Mutex
 	NReduceTask    int
 	ReduceTaskLock sync.Mutex
+	NMapLock       sync.Mutex
 }
 
 type File struct {
@@ -40,12 +41,14 @@ func (c *Coordinator) putFilesToChannel() chan File {
 		go func(f string, i int) {
 			ch <- File{f, i}
 		}(filename, index)
+		c.NMapLock.Lock()
 		c.NMap += 1
+		c.NMapLock.Unlock()
 	}
 	return ch
 }
 
-func (c *Coordinator) GetInitialData(args *RpcArgs, reply *RpcReply) error {
+func (c *Coordinator) DoMapTask(args *RpcArgs, reply *RpcReply) error {
 	// file name should be received from the channel
 	select {
 	case file := <-c.FileNames:
@@ -78,29 +81,31 @@ func (c *Coordinator) MapNotify(args *RpcArgs, reply *RpcReply) error {
 	c.NMapTask -= 1
 	c.MapTaskLock.Unlock()
 	return nil
-
 }
-
-func (c *Coordinator) StartReduce(args *RpcArgs, reply *RpcReply) error {
-	if c.NMapTask == 0 {
-		reply.StartReduce = true
-	} else {
-		reply.StartReduce = false
+func (c *Coordinator) ReduceNotify(args *RpcArgs, reply *RpcReply) error {
+	c.ReduceTaskLock.Lock()
+	if c.NReduceTask == c.NReduce {
+		return errors.New("reducer notify finished")
 	}
+	c.NReduceTask += 1
+	c.ReduceTaskLock.Unlock()
 	return nil
 }
 
-func (c *Coordinator) GetReduceNumber(args *RpcArgs, reply *RpcReply) error {
-	select {
-	case n := <-c.ReduceNumbers:
-		c.ReduceTaskLock.Lock()
-		reply.ReduceNumber = n
-		c.NReduceTask -= 1
-		c.ReduceTaskLock.Unlock()
-		return nil
-	default:
-		return errors.New("no reduce task left")
+func (c *Coordinator) DoReduceTask(args *RpcArgs, reply *RpcReply) error {
+	if c.NMapTask == 0 {
+		reply.StartReduce = true
+		select {
+		case n := <-c.ReduceNumbers:
+			reply.ReduceNumber = n
+			reply.NMap = c.NMap
+			return nil
+		default:
+			return errors.New("no reduce task left")
+		}
 	}
+	reply.StartReduce = false
+	return nil
 
 }
 
@@ -118,6 +123,8 @@ func (c *Coordinator) server() {
 	go http.Serve(l, nil)
 }
 
+// fixme: this is a dummy function. (should wait all reduce tasks to finish)
+
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
@@ -126,7 +133,7 @@ func (c *Coordinator) Done() bool {
 	// periodically, check if the NReduceTask equals to 0
 	// if so, return true
 	c.ReduceTaskLock.Lock()
-	if c.NReduceTask == 0 {
+	if c.NReduceTask == c.NReduce {
 		ret = true
 	}
 	c.ReduceTaskLock.Unlock()
@@ -144,7 +151,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.NReduce = nReduce
 	c.ReduceNumbers = c.generateReduceNumber(nReduce)
 	c.NMapTask = c.NMap * c.NReduce
-	c.NReduceTask = c.NReduce
+	c.NReduceTask = 0
 
 	c.server()
 	return &c

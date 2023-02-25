@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/rpc"
 	"os"
-	"path/filepath"
 	"sort"
 	"time"
 )
@@ -40,7 +39,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 	args := RpcArgs{}
 	reply := RpcReply{}
-	for call("Coordinator.GetInitialData", &args, &reply) {
+	for call("Coordinator.DoMapTask", &args, &reply) {
 
 		file, err := os.Open(reply.FileName)
 		if err != nil {
@@ -62,7 +61,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 		// 4. create intermediate files
 		for i := 0; i < reply.NReduce; i += 1 {
-			filename := fmt.Sprintf("mr_%d_%d", reply.MapNumber, i)
+			filename := fmt.Sprintf("mr-%d-%d", reply.MapNumber, i)
 			file, err := os.Create(filename)
 			if err != nil {
 				log.Fatalf("cannot create %v", filename)
@@ -88,19 +87,21 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			intermediate[i].Close()
 			call("Coordinator.MapNotify", &args, &reply)
 		}
+		reply = RpcReply{}
 	}
 
-	// 6. check if reduce can start or not
-	for !reply.StartReduce {
-		call("Coordinator.StartReduce", &args, &reply)
-		time.Sleep(time.Second * 3)
-		fmt.Print("wait for reduce start\n")
-	}
+	reply = RpcReply{}
+	for call("Coordinator.DoReduceTask", &args, &reply) {
+		if !reply.StartReduce {
+			time.Sleep(time.Second * 3)
+			fmt.Print("wait for reduce start\n")
+			reply = RpcReply{}
+			continue
+		}
 
-	for call("Coordinator.GetReduceNumber", &args, &reply) {
 		kva := []KeyValue{}
 		for i := 0; i < reply.NMap; i++ {
-			filename := fmt.Sprintf("mr_%d_%d", i, reply.ReduceNumber)
+			filename := fmt.Sprintf("mr-%d-%d", i, reply.ReduceNumber)
 			file, err := os.Open(filename)
 			if err != nil {
 				log.Fatalf("cannot open %v", filename)
@@ -114,6 +115,10 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				kva = append(kva, kv)
 			}
 			file.Close()
+			err = os.Remove(filename)
+			if err != nil {
+				log.Fatalf("cannot remove %v", filename)
+			}
 		}
 		sort.Sort(ByKey(kva))
 
@@ -135,18 +140,8 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			i = j
 		}
 		ofile.Close()
-	}
-
-	// Delete intermediate files
-	files, err := filepath.Glob("mr_*_*")
-	if err != nil {
-		log.Fatalf("cannot glob")
-	}
-	for _, filename := range files {
-		err := os.Remove(filename)
-		if err != nil {
-			log.Fatalf("cannot remove %v", filename)
-		}
+		call("Coordinator.ReduceNotify", &args, &reply)
+		reply = RpcReply{}
 	}
 }
 
