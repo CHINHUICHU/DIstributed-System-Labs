@@ -88,6 +88,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			call("Coordinator.MapNotify", &args, &reply)
 		}
 		reply = RpcReply{}
+		fmt.Println("map task done", reply.MapNumber)
 	}
 
 	reply = RpcReply{}
@@ -98,26 +99,39 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			reply = RpcReply{}
 		} else {
 			kva := []KeyValue{}
-			for i := 0; i < reply.NMap; i++ {
+			for i := 0; i < reply.NMap; i += 1 {
 				filename := fmt.Sprintf("mr-%d-%d", i, reply.ReduceNumber)
-				file, err := os.Open(filename)
-				if err != nil {
-					log.Fatalf("cannot open %v", filename)
+				retry := 0
+				// open file error handling
+				var file *os.File
+				var err error
+				for retry < 3 {
+					file, err = os.Open(filename)
+					if err != nil {
+						log.Fatalf("cannot open %v\n", filename)
+						retry += 1
+						time.Sleep(time.Second * 1)
+					} else {
+						break
+					}
 				}
+				// decode error handling
 				dec := json.NewDecoder(file)
 				for {
 					var kv KeyValue
 					if err := dec.Decode(&kv); err != nil {
+						// EOF
 						break
 					}
 					kva = append(kva, kv)
 				}
+
 				file.Close()
-				err = os.Remove(filename)
-				if err != nil {
+				if err := os.Remove(filename); err != nil {
 					log.Fatalf("cannot remove %v", filename)
 				}
 			}
+
 			sort.Sort(ByKey(kva))
 
 			oname := fmt.Sprintf("mr-out-%d", reply.ReduceNumber)
@@ -139,7 +153,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			}
 			ofile.Close()
 			call("Coordinator.ReduceNotify", &args, &reply)
-			fmt.Println("reduce done")
+			fmt.Println("reduce task done with reduce number", reply.ReduceNumber)
 		}
 	}
 }

@@ -99,6 +99,7 @@ func (c *Coordinator) DoReduceTask(args *RpcArgs, reply *RpcReply) error {
 		reply.StartReduce = true
 		select {
 		case n := <-c.ReduceNumbers:
+			fmt.Println("reduce number", n)
 			reply.ReduceNumber = n
 			reply.NMap = c.NMap
 			return nil
@@ -135,10 +136,11 @@ func (c *Coordinator) Done() bool {
 	// periodically, check if the NReduceTask equals to 0
 	// if so, return true
 	c.ReduceTaskLock.Lock()
+	defer c.ReduceTaskLock.Unlock()
 	if c.NReduceTask == c.NReduce {
+		fmt.Println("all reduce tasks finished, coordinator done")
 		ret = true
 	}
-	c.ReduceTaskLock.Unlock()
 
 	return ret
 }
