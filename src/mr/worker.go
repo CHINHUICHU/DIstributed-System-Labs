@@ -85,10 +85,10 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				}
 			}
 			intermediate[i].Close()
-			call("Coordinator.MapNotify", &args, &reply)
 		}
-		reply = RpcReply{}
+		call("Coordinator.MapNotify", &args, &reply)
 		fmt.Println("map task done", reply.MapNumber)
+		reply = RpcReply{}
 	}
 
 	reply = RpcReply{}

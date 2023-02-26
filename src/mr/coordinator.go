@@ -76,10 +76,10 @@ func (c *Coordinator) generateReduceNumber(nReduce int) chan int {
 func (c *Coordinator) MapNotify(args *RpcArgs, reply *RpcReply) error {
 	c.MapTaskLock.Lock()
 	defer c.MapTaskLock.Unlock()
-	if c.NMapTask <= 0 {
+	if c.NMapTask == c.NMap {
 		return errors.New("mapper notify finished")
 	}
-	c.NMapTask -= 1
+	c.NMapTask += 1
 	return nil
 }
 func (c *Coordinator) ReduceNotify(args *RpcArgs, reply *RpcReply) error {
@@ -95,11 +95,10 @@ func (c *Coordinator) ReduceNotify(args *RpcArgs, reply *RpcReply) error {
 func (c *Coordinator) DoReduceTask(args *RpcArgs, reply *RpcReply) error {
 	c.MapTaskLock.Lock()
 	defer c.MapTaskLock.Unlock()
-	if c.NMapTask == 0 {
+	if c.NMapTask == c.NMap {
 		reply.StartReduce = true
 		select {
 		case n := <-c.ReduceNumbers:
-			fmt.Println("reduce number", n)
 			reply.ReduceNumber = n
 			reply.NMap = c.NMap
 			return nil
@@ -141,7 +140,6 @@ func (c *Coordinator) Done() bool {
 		fmt.Println("all reduce tasks finished, coordinator done")
 		ret = true
 	}
-
 	return ret
 }
 
@@ -154,7 +152,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.FileNames = c.putFilesToChannel()
 	c.NReduce = nReduce
 	c.ReduceNumbers = c.generateReduceNumber(nReduce)
-	c.NMapTask = c.NMap * c.NReduce
+	c.NMapTask = 0
 	c.NReduceTask = 0
 
 	c.server()
