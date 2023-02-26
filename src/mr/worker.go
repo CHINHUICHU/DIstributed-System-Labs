@@ -96,52 +96,51 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			time.Sleep(time.Second * 3)
 			fmt.Print("wait for reduce start\n")
 			reply = RpcReply{}
-			continue
-		}
-
-		kva := []KeyValue{}
-		for i := 0; i < reply.NMap; i++ {
-			filename := fmt.Sprintf("mr-%d-%d", i, reply.ReduceNumber)
-			file, err := os.Open(filename)
-			if err != nil {
-				log.Fatalf("cannot open %v", filename)
-			}
-			dec := json.NewDecoder(file)
-			for {
-				var kv KeyValue
-				if err := dec.Decode(&kv); err != nil {
-					break
+		} else {
+			kva := []KeyValue{}
+			for i := 0; i < reply.NMap; i++ {
+				filename := fmt.Sprintf("mr-%d-%d", i, reply.ReduceNumber)
+				file, err := os.Open(filename)
+				if err != nil {
+					log.Fatalf("cannot open %v", filename)
 				}
-				kva = append(kva, kv)
+				dec := json.NewDecoder(file)
+				for {
+					var kv KeyValue
+					if err := dec.Decode(&kv); err != nil {
+						break
+					}
+					kva = append(kva, kv)
+				}
+				file.Close()
+				err = os.Remove(filename)
+				if err != nil {
+					log.Fatalf("cannot remove %v", filename)
+				}
 			}
-			file.Close()
-			err = os.Remove(filename)
-			if err != nil {
-				log.Fatalf("cannot remove %v", filename)
+			sort.Sort(ByKey(kva))
+
+			oname := fmt.Sprintf("mr-out-%d", reply.ReduceNumber)
+			ofile, _ := os.Create(oname)
+
+			for i := 0; i < len(kva); {
+				j := i + 1
+				for j < len(kva) && kva[j].Key == kva[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, kva[k].Value)
+				}
+				output := reducef(kva[i].Key, values)
+				fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
+
+				i = j
 			}
+			ofile.Close()
+			call("Coordinator.ReduceNotify", &args, &reply)
+			fmt.Println("reduce done")
 		}
-		sort.Sort(ByKey(kva))
-
-		oname := fmt.Sprintf("mr-out-%d", reply.ReduceNumber)
-		ofile, _ := os.Create(oname)
-
-		for i := 0; i < len(kva); {
-			j := i + 1
-			for j < len(kva) && kva[j].Key == kva[i].Key {
-				j++
-			}
-			values := []string{}
-			for k := i; k < j; k++ {
-				values = append(values, kva[k].Value)
-			}
-			output := reducef(kva[i].Key, values)
-			fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
-
-			i = j
-		}
-		ofile.Close()
-		call("Coordinator.ReduceNotify", &args, &reply)
-		reply = RpcReply{}
 	}
 }
 

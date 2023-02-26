@@ -75,25 +75,26 @@ func (c *Coordinator) generateReduceNumber(nReduce int) chan int {
 
 func (c *Coordinator) MapNotify(args *RpcArgs, reply *RpcReply) error {
 	c.MapTaskLock.Lock()
+	defer c.MapTaskLock.Unlock()
 	if c.NMapTask <= 0 {
 		return errors.New("mapper notify finished")
 	}
 	c.NMapTask -= 1
-	c.MapTaskLock.Unlock()
 	return nil
 }
 func (c *Coordinator) ReduceNotify(args *RpcArgs, reply *RpcReply) error {
 	c.ReduceTaskLock.Lock()
+	defer c.ReduceTaskLock.Unlock()
 	if c.NReduceTask == c.NReduce {
 		return errors.New("reducer notify finished")
 	}
 	c.NReduceTask += 1
-	c.ReduceTaskLock.Unlock()
 	return nil
 }
 
 func (c *Coordinator) DoReduceTask(args *RpcArgs, reply *RpcReply) error {
 	c.MapTaskLock.Lock()
+	defer c.MapTaskLock.Unlock()
 	if c.NMapTask == 0 {
 		reply.StartReduce = true
 		select {
@@ -106,7 +107,6 @@ func (c *Coordinator) DoReduceTask(args *RpcArgs, reply *RpcReply) error {
 		}
 	}
 	reply.StartReduce = false
-	c.MapTaskLock.Unlock()
 	return nil
 
 }
