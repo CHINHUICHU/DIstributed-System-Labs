@@ -38,6 +38,7 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
 	args := RpcArgs{}
+	// record map start time for each map task
 	reply := RpcReply{}
 	for call("Coordinator.DoMapTask", &args, &reply) {
 
@@ -61,13 +62,13 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 		// 4. create intermediate files
 		for i := 0; i < reply.NReduce; i += 1 {
-			filename := fmt.Sprintf("mr-%d-%d", reply.MapNumber, i)
-			file, err := os.Create(filename)
+			tempFilename := fmt.Sprintf("temp-mr-%d-%d", reply.MapNumber, i)
+			tempFile, err := ioutil.TempFile("", tempFilename)
 			if err != nil {
-				log.Fatalf("cannot create %v", filename)
+				log.Fatalf("cannot create temp file %v", tempFilename)
 			}
-			intermediate[i] = file
-			encoders[i] = json.NewEncoder(file)
+			intermediate[i] = tempFile
+			encoders[i] = json.NewEncoder(tempFile)
 		}
 
 		// split key value pairs into buckets
@@ -86,12 +87,21 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			}
 			intermediate[i].Close()
 		}
-		call("Coordinator.MapNotify", &args, &reply)
-		fmt.Println("map task done", reply.MapNumber)
-		reply = RpcReply{}
+
+		// 6. rename temp files to final files
+		for i := 0; i < reply.NReduce; i += 1 {
+			finalFilename := fmt.Sprintf("mr-%d-%d", reply.MapNumber, i)
+			err := os.Rename(intermediate[i].Name(), finalFilename)
+			if err != nil {
+				log.Fatalf("cannot rename %v", intermediate[i].Name())
+			}
+		}
+		args.MapNumber = reply.MapNumber
+		if call("Coordinator.MapNotify", &args, &reply) {
+			fmt.Println("map notify done", reply.MapNumber)
+		}
 	}
 
-	reply = RpcReply{}
 	for call("Coordinator.DoReduceTask", &args, &reply) {
 		if !reply.StartReduce {
 			time.Sleep(time.Second * 3)
@@ -127,15 +137,12 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				}
 
 				file.Close()
-				if err := os.Remove(filename); err != nil {
-					log.Fatalf("cannot remove %v", filename)
-				}
 			}
 
 			sort.Sort(ByKey(kva))
 
-			oname := fmt.Sprintf("mr-out-%d", reply.ReduceNumber)
-			ofile, _ := os.Create(oname)
+			oname := fmt.Sprintf("temp-mr-out-%d", reply.ReduceNumber)
+			ofile, _ := ioutil.TempFile("", oname)
 
 			for i := 0; i < len(kva); {
 				j := i + 1
@@ -152,8 +159,21 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				i = j
 			}
 			ofile.Close()
-			call("Coordinator.ReduceNotify", &args, &reply)
-			fmt.Println("reduce task done with reduce number", reply.ReduceNumber)
+			for i := 0; i < reply.NMap; i += 1 {
+				// remove intermediate files
+				filename := fmt.Sprintf("mr-%d-%d", i, reply.ReduceNumber)
+				if err := os.Remove(filename); err != nil {
+					log.Fatalf("cannot remove %v", filename)
+				}
+			}
+			err := os.Rename(ofile.Name(), fmt.Sprintf("mr-out-%d", reply.ReduceNumber))
+			if err != nil {
+				log.Fatalf("cannot rename %v", ofile.Name())
+			}
+			args.ReduceNumber = reply.ReduceNumber
+			if call("Coordinator.ReduceNotify", &args, &reply) {
+				fmt.Println("reduce notify done", reply.ReduceNumber)
+			}
 		}
 	}
 }

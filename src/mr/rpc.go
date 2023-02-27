@@ -17,6 +17,8 @@ import (
 //
 
 type RpcArgs struct {
+	MapNumber    int
+	ReduceNumber int
 }
 
 // need default value
