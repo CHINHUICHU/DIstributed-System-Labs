@@ -89,7 +89,7 @@ func (c *Coordinator) assignMapTask(args *RpcArgs, reply *RpcReply) error {
 		reply.MapNumber = file.Index
 		reply.NReduce = c.NReduce
 		reply.NMap = c.NMap
-		fmt.Println("assign map task", file.Name, file.Index)
+		// fmt.Println("assign map task", file.Name, file.Index)
 		// record get task time
 		c.MapStatusLocks[file.Index].Lock()
 		c.MapStatus[file.Index].Time = time.Now()
@@ -108,7 +108,7 @@ func (c *Coordinator) assignReduceTask(args *RpcArgs, reply *RpcReply) error {
 		reply.ReduceNumber = n
 		reply.NMap = c.NMap
 		reply.NReduce = c.NReduce
-		fmt.Println("assign reduce task", n)
+		// fmt.Println("assign reduce task", n)
 		// record get task time
 		c.ReduceStatusLocks[n].Lock()
 		c.ReduceStatus[n].Time = time.Now()
@@ -259,6 +259,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.finishSetup = true
 	fmt.Println("coordinator setup finished")
 	c.server()
+	// first time, wait for 10 seconds to check task status
+	time.Sleep(10 * time.Second)
 	go c.checkTaskStatus()
 
 	return &c

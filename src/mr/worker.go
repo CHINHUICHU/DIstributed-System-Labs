@@ -84,7 +84,7 @@ func doMap(mapf func(string, string) []KeyValue, fileName string, NReduce int, m
 
 	// 4. create intermediate files
 	for i := 0; i < NReduce; i += 1 {
-		tempFilename := fmt.Sprintf("temp-mr-%d-%d", mapNumber, i)
+		tempFilename := fmt.Sprintf("temp-mr-%d-%d", mapNumber+1, i)
 		tempFile, err := ioutil.TempFile("", tempFilename)
 		if err != nil {
 			log.Fatalf("cannot create temp file %v", tempFilename)
@@ -111,7 +111,7 @@ func doMap(mapf func(string, string) []KeyValue, fileName string, NReduce int, m
 
 	// 7. rename temp files to final files
 	for i := 0; i < NReduce; i += 1 {
-		finalFilename := fmt.Sprintf("mr-%d-%d", mapNumber, i)
+		finalFilename := fmt.Sprintf("mr-%d-%d", mapNumber+1, i)
 		err := os.Rename(intermediate[i].Name(), finalFilename)
 		if err != nil {
 			log.Fatalf("cannot rename %v", intermediate[i].Name())
@@ -124,7 +124,7 @@ func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int)
 	kva := []KeyValue{}
 	for i := 0; i < NMap; i += 1 {
 		// 1. read intermediate files
-		filename := fmt.Sprintf("mr-%d-%d", i, reduceNumber)
+		filename := fmt.Sprintf("mr-%d-%d", i+1, reduceNumber)
 		file, err := os.Open(filename)
 		if err != nil {
 			panic(err)
@@ -165,7 +165,7 @@ func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int)
 	ofile.Close()
 	// 5. rename temp file to final file
 	for i := 0; i < NMap; i += 1 {
-		filename := fmt.Sprintf("mr-%d-%d", i, reduceNumber)
+		filename := fmt.Sprintf("mr-%d-%d", i+1, reduceNumber)
 		if err := os.Remove(filename); err != nil {
 			log.Fatalf("cannot remove %v", filename)
 		}
@@ -189,10 +189,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	defer c.Close()
 
 	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
-	}
+	return err == nil
 
-	fmt.Println(err)
-	return false
 }
