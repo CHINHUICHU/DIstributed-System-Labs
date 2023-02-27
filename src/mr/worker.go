@@ -127,7 +127,6 @@ func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int)
 		filename := fmt.Sprintf("mr-%d-%d", i, reduceNumber)
 		file, err := os.Open(filename)
 		if err != nil {
-			log.Fatalf("cannot open %v\n", filename)
 			panic(err)
 		}
 		// 2. decode intermediate files

@@ -178,8 +178,10 @@ func (c *Coordinator) checkMapTaskStatus() {
 	c.MapTaskLock.Lock()
 	defer c.MapTaskLock.Unlock()
 	if c.NMapTask < c.NMap {
-		for i, st := range c.MapStatus {
-			if !st.Done && time.Since(st.Time) > 10*time.Second {
+		for i := 0; i < c.NMap; i += 1 {
+			c.MapStatusLocks[i].Lock()
+			defer c.MapStatusLocks[i].Unlock()
+			if !c.MapStatus[i].Done && time.Since(c.MapStatus[i].Time) > 10*time.Second {
 				fmt.Println("map task timeout", i)
 				go func(fileName string, i int) {
 					c.FileNames <- File{fileName, i}
@@ -195,8 +197,10 @@ func (c *Coordinator) checkReduceTaskStatus() {
 	c.ReduceTaskLock.Lock()
 	defer c.ReduceTaskLock.Unlock()
 	if c.NReduceTask < c.NReduce {
-		for i, st := range c.ReduceStatus {
-			if !st.Done && time.Since(st.Time) > 10*time.Second {
+		for i := 0; i < c.NReduce; i += 1 {
+			c.ReduceStatusLocks[i].Lock()
+			defer c.ReduceStatusLocks[i].Unlock()
+			if !c.ReduceStatus[i].Done && time.Since(c.ReduceStatus[i].Time) > 10*time.Second {
 				fmt.Println("reduce task timeout", i)
 				go func(i int) {
 					c.ReduceNumbers <- i
