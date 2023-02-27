@@ -46,32 +46,36 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			if reply.Task == "map" {
 				doMap(mapf, reply.FileName, reply.NReduce, reply.MapNumber)
 				args.Task = "map"
-			} else if reply.Task == "reduce" {
+				args.MapNumber = reply.MapNumber
+				call("Coordinator.TaskFinished", &args, &reply)
+			} else {
 				doReduce(reducef, reply.NMap, reply.ReduceNumber)
 				args.Task = "reduce"
+				args.ReduceNumber = reply.ReduceNumber
+				call("Coordinator.TaskFinished", &args, &reply)
 			}
-			// notify coordinator that the task is finished
-			call("Coordinator.TaskFinished", &args, &reply)
 		} else {
-			// sleep for 3 seconds and retry
-			time.Sleep(3 * time.Second)
+			// sleep for 1 seconds and retry
+			time.Sleep(1 * time.Second)
+			reply = RpcReply{}
 		}
 	}
 }
 
 func doMap(mapf func(string, string) []KeyValue, fileName string, NReduce int, mapNumber int) {
+	// 1. read file
 	file, err := os.Open(fileName)
 	if err != nil {
 		log.Fatalf("cannot open %v", fileName)
 	}
-
+	// 2. read file content
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", fileName)
 	}
 
 	file.Close()
-
+	// 3. call mapf
 	kva := mapf(fileName, string(content))
 
 	intermediate := make([]*os.File, NReduce)
@@ -88,14 +92,13 @@ func doMap(mapf func(string, string) []KeyValue, fileName string, NReduce int, m
 		intermediate[i] = tempFile
 		encoders[i] = json.NewEncoder(tempFile)
 	}
-
-	// split key value pairs into buckets
+	// 5. split kv into NReduce buckets
 	for _, kv := range kva {
 		bucket := ihash(kv.Key) % NReduce
 		splitKv[bucket] = append(splitKv[bucket], kv)
 	}
 
-	// 5. write kv to intermediate files
+	// 6. write kv to intermediate files
 	for i, bucket := range splitKv {
 		for _, kv := range bucket {
 			err := encoders[i].Encode(&kv)
@@ -106,7 +109,7 @@ func doMap(mapf func(string, string) []KeyValue, fileName string, NReduce int, m
 		intermediate[i].Close()
 	}
 
-	// 6. rename temp files to final files
+	// 7. rename temp files to final files
 	for i := 0; i < NReduce; i += 1 {
 		finalFilename := fmt.Sprintf("mr-%d-%d", mapNumber, i)
 		err := os.Rename(intermediate[i].Name(), finalFilename)
@@ -120,13 +123,14 @@ func doMap(mapf func(string, string) []KeyValue, fileName string, NReduce int, m
 func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int) {
 	kva := []KeyValue{}
 	for i := 0; i < NMap; i += 1 {
+		// 1. read intermediate files
 		filename := fmt.Sprintf("mr-%d-%d", i, reduceNumber)
 		file, err := os.Open(filename)
 		if err != nil {
 			log.Fatalf("cannot open %v\n", filename)
 			panic(err)
 		}
-		// decode error handling
+		// 2. decode intermediate files
 		dec := json.NewDecoder(file)
 		for {
 			var kv KeyValue
@@ -139,12 +143,12 @@ func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int)
 
 		file.Close()
 	}
-
+	// 3. sort by key
 	sort.Sort(ByKey(kva))
 
 	oname := fmt.Sprintf("temp-mr-out-%d", reduceNumber)
 	ofile, _ := ioutil.TempFile("", oname)
-
+	// 4. call reducef
 	for i := 0; i < len(kva); {
 		j := i + 1
 		for j < len(kva) && kva[j].Key == kva[i].Key {
@@ -160,8 +164,8 @@ func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int)
 		i = j
 	}
 	ofile.Close()
+	// 5. rename temp file to final file
 	for i := 0; i < NMap; i += 1 {
-		// remove intermediate files
 		filename := fmt.Sprintf("mr-%d-%d", i, reduceNumber)
 		if err := os.Remove(filename); err != nil {
 			log.Fatalf("cannot remove %v", filename)
