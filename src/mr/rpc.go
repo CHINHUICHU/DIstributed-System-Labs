@@ -17,12 +17,14 @@ import (
 //
 
 type RpcArgs struct {
+	Task         string
 	MapNumber    int
 	ReduceNumber int
 }
 
 // need default value
 type RpcReply struct {
+	Task         string
 	FileName     string
 	MapNumber    int
 	NMap         int

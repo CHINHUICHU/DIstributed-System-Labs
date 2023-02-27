@@ -14,23 +14,23 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	Files              []string // for retry map task
-	FileNames          chan File
-	NMap               int
-	NReduce            int
-	ReduceNumbers      chan int
-	NMapTask           int
-	MapTaskLock        sync.Mutex
-	NReduceTask        int
-	ReduceTaskLock     sync.Mutex
-	NMapLock           sync.Mutex
-	MapTimeRecords     []time.Time
-	ReduceTimeRecords  []time.Time
-	MapFinishStatus    []bool
-	ReduceFinishStatus []bool
-	MapRecordLocks     []sync.Mutex
-	ReduceRecordLocks  []sync.Mutex
-	finishSetup        bool
+	Files          []string // for retry map task
+	FileNames      chan File
+	NMap           int
+	NReduce        int
+	ReduceNumbers  chan int
+	NMapTask       int
+	MapTaskLock    sync.Mutex
+	NReduceTask    int
+	ReduceTaskLock sync.Mutex
+	NMapLock       sync.Mutex
+	// MapTimeRecords     []time.Time
+	// ReduceTimeRecords  []time.Time
+	// MapFinishStatus    []bool
+	// ReduceFinishStatus []bool
+	// MapRecordLocks     []sync.Mutex
+	// ReduceRecordLocks  []sync.Mutex
+	finishSetup bool
 }
 
 type File struct {
@@ -58,28 +58,6 @@ func (c *Coordinator) processFiles() chan File {
 	return ch
 }
 
-func (c *Coordinator) DoMapTask(args *RpcArgs, reply *RpcReply) error {
-	// file name should be received from the channel
-	if c.finishSetup {
-		select {
-		case file := <-c.FileNames:
-			fmt.Println(file.Name)
-			reply.FileName = file.Name
-			reply.MapNumber = file.Index
-			c.MapRecordLocks[args.MapNumber].Lock()
-			c.MapTimeRecords[args.MapNumber] = time.Now()
-			c.MapRecordLocks[args.MapNumber].Unlock()
-			reply.NReduce = c.NReduce
-			reply.NMap = c.NMap
-			return nil
-		default:
-			return errors.New("no more file")
-		}
-	} else {
-		return errors.New("not ready")
-	}
-}
-
 func (c *Coordinator) generateReduceNumber(nReduce int) chan int {
 	ch := make(chan int)
 	for i := 0; i < nReduce; i += 1 {
@@ -90,62 +68,89 @@ func (c *Coordinator) generateReduceNumber(nReduce int) chan int {
 	return ch
 }
 
-func (c *Coordinator) MapNotify(args *RpcArgs, reply *RpcReply) error {
-	c.MapTaskLock.Lock()
-	defer c.MapTaskLock.Unlock()
-	if c.NMapTask == c.NMap {
-		return errors.New("mapper notify finished")
+func (c *Coordinator) DoTask(args *RpcArgs, reply *RpcReply) error {
+	// coordinator should first check if all the map tasks are finished
+	// if so, it should start the reduce tasks
+	// if not, it should assign a map task to the worker
+	if c.finishSetup {
+		c.MapTaskLock.Lock()
+		defer c.MapTaskLock.Unlock()
+		if c.NMapTask == c.NMap {
+			// assign a reduce task to the worker
+			time.Sleep(1 * time.Second) // buffer time for the worker to finish the map task
+			reply.Task = "reduce"
+			select {
+			case n := <-c.ReduceNumbers:
+				reply.ReduceNumber = n
+				// c.ReduceRecordLocks[args.ReduceNumber].Lock()
+				// c.ReduceTimeRecords[args.ReduceNumber] = time.Now()
+				// c.ReduceRecordLocks[args.ReduceNumber].Unlock()
+				reply.NMap = c.NMap
+				return nil
+			default:
+				return errors.New("no reduce task left")
+			}
+
+		} else {
+			// assign a map task to the worker
+			reply.Task = "map"
+			select {
+			case file := <-c.FileNames:
+				fmt.Println(file.Name)
+				reply.FileName = file.Name
+				reply.MapNumber = file.Index
+				// c.MapRecordLocks[args.MapNumber].Lock()
+				// c.MapTimeRecords[args.MapNumber] = time.Now()
+				// c.MapRecordLocks[args.MapNumber].Unlock()
+				reply.NReduce = c.NReduce
+				reply.NMap = c.NMap
+				return nil
+			default:
+				return errors.New("no more file")
+			}
+		}
+
+	} else {
+		return errors.New("not ready")
 	}
-	if !c.MapFinishStatus[args.MapNumber] {
-		c.MapRecordLocks[args.MapNumber].Lock()
-		c.MapTimeRecords[args.MapNumber] = time.Now()
-		c.MapFinishStatus[args.MapNumber] = true
-		c.MapRecordLocks[args.MapNumber].Unlock()
+}
+
+// recieve task finished message from workers
+func (c *Coordinator) TaskFinished(args *RpcArgs, reply *RpcReply) error {
+	if args.Task == "map" {
+		c.MapTaskLock.Lock()
+		defer c.MapTaskLock.Unlock()
+		if c.NMapTask == c.NMap {
+			return errors.New("map task already finished")
+		}
+		// if !c.MapFinishStatus[args.MapNumber] {
+		// 	c.MapRecordLocks[args.MapNumber].Lock()
+		// 	c.MapTimeRecords[args.MapNumber] = time.Now()
+		// 	c.MapFinishStatus[args.MapNumber] = true
+		// 	c.MapRecordLocks[args.MapNumber].Unlock()
 		c.NMapTask += 1
 		return nil
+		// 	return nil
+		// } else {
+		// 	return errors.New("map task already finished")
+		// }
 	} else {
-		return errors.New("map task already finished")
-	}
-
-}
-func (c *Coordinator) ReduceNotify(args *RpcArgs, reply *RpcReply) error {
-	c.ReduceTaskLock.Lock()
-	defer c.ReduceTaskLock.Unlock()
-	if c.NReduceTask == c.NReduce {
-		return errors.New("reducer notify finished")
-	}
-	if !c.ReduceFinishStatus[args.ReduceNumber] {
-		c.ReduceRecordLocks[args.ReduceNumber].Lock()
-		c.ReduceTimeRecords[args.ReduceNumber] = time.Now()
-		c.ReduceFinishStatus[args.ReduceNumber] = true
-		c.ReduceRecordLocks[args.ReduceNumber].Unlock()
+		c.ReduceTaskLock.Lock()
+		defer c.ReduceTaskLock.Unlock()
+		if c.NReduceTask == c.NReduce {
+			return errors.New("reduce task already finished")
+		}
+		// if !c.ReduceFinishStatus[args.ReduceNumber] {
+		// 	c.ReduceRecordLocks[args.ReduceNumber].Lock()
+		// 	c.ReduceTimeRecords[args.ReduceNumber] = time.Now()
+		// 	c.ReduceFinishStatus[args.ReduceNumber] = true
+		// 	c.ReduceRecordLocks[args.ReduceNumber].Unlock()
 		c.NReduceTask += 1
 		return nil
-	} else {
-		return errors.New("reduce task already finished")
+		// } else {
+		// 	return errors.New("reduce task already finished")
+		// }
 	}
-}
-
-func (c *Coordinator) DoReduceTask(args *RpcArgs, reply *RpcReply) error {
-	c.MapTaskLock.Lock()
-	defer c.MapTaskLock.Unlock()
-	if c.NMapTask == c.NMap {
-		reply.StartReduce = true
-		select {
-		case n := <-c.ReduceNumbers:
-			reply.ReduceNumber = n
-			c.ReduceRecordLocks[args.ReduceNumber].Lock()
-			c.ReduceTimeRecords[args.ReduceNumber] = time.Now()
-			c.ReduceRecordLocks[args.ReduceNumber].Unlock()
-			reply.NMap = c.NMap
-			return nil
-		default:
-			return errors.New("no reduce task left")
-		}
-	}
-	reply.StartReduce = false
-	return nil
-
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -180,51 +185,51 @@ func (c *Coordinator) Done() bool {
 
 // periodically, check if the MapTimeRecords and time.Now differ more than 10 seconds
 // If so, retry the map task by sending the file name to the channel
-func (c *Coordinator) checkMapStatus() {
-	for {
-		finishedMap := 0
-		for i, t := range c.MapTimeRecords {
-			c.MapRecordLocks[i].Lock()
-			if time.Now().Sub(t) > 10*time.Second && !c.MapFinishStatus[i] {
-				c.MapTimeRecords[i] = time.Now()
-				c.FileNames <- File{c.Files[i], i}
-			} else if c.MapFinishStatus[i] {
-				finishedMap += 1
-			}
-			c.MapRecordLocks[i].Unlock()
-		}
-		fmt.Println("check map status", finishedMap, "mappers finished....")
-		if finishedMap == c.NMap {
-			break
-		}
-		time.Sleep(10 * time.Second)
-	}
-}
+// func (c *Coordinator) checkMapStatus() {
+// 	for {
+// 		finishedMap := 0
+// 		for i, t := range c.MapTimeRecords {
+// 			c.MapRecordLocks[i].Lock()
+// 			if time.Now().Sub(t) > 10*time.Second && !c.MapFinishStatus[i] {
+// 				c.MapTimeRecords[i] = time.Now()
+// 				c.FileNames <- File{c.Files[i], i}
+// 			} else if c.MapFinishStatus[i] {
+// 				finishedMap += 1
+// 			}
+// 			c.MapRecordLocks[i].Unlock()
+// 		}
+// 		fmt.Println("check map status", finishedMap, "mappers finished....")
+// 		if finishedMap == c.NMap {
+// 			break
+// 		}
+// 		time.Sleep(10 * time.Second)
+// 	}
+// }
 
 // periodically, check if the ReduceTimeRecords and time.Now differ more than 10 seconds
 // If so, retry the reduce task by sending the reduce number to the channel
-func (c *Coordinator) checkReduceStatus() {
-	for {
-		finishedReduce := 0
-		for i, t := range c.ReduceTimeRecords {
-			c.ReduceRecordLocks[i].Lock()
-			if time.Now().Sub(t) > 10*time.Second && !c.ReduceFinishStatus[i] {
-				fmt.Println("reduce task", i, "failed, retry")
-				c.ReduceTimeRecords[i] = time.Now()
-				c.ReduceNumbers <- i
-			} else if c.ReduceFinishStatus[i] {
-				finishedReduce += 1
-			}
-			c.ReduceRecordLocks[i].Unlock()
-		}
-		fmt.Println("check reduce status", finishedReduce, "reducers finished....")
+// func (c *Coordinator) checkReduceStatus() {
+// 	for {
+// 		finishedReduce := 0
+// 		for i, t := range c.ReduceTimeRecords {
+// 			c.ReduceRecordLocks[i].Lock()
+// 			if time.Now().Sub(t) > 10*time.Second && !c.ReduceFinishStatus[i] {
+// 				fmt.Println("reduce task", i, "failed, retry")
+// 				c.ReduceTimeRecords[i] = time.Now()
+// 				c.ReduceNumbers <- i
+// 			} else if c.ReduceFinishStatus[i] {
+// 				finishedReduce += 1
+// 			}
+// 			c.ReduceRecordLocks[i].Unlock()
+// 		}
+// 		fmt.Println("check reduce status", finishedReduce, "reducers finished....")
 
-		if finishedReduce == c.NReduce {
-			break
-		}
-		time.Sleep(10 * time.Second)
-	}
-}
+// 		if finishedReduce == c.NReduce {
+// 			break
+// 		}
+// 		time.Sleep(10 * time.Second)
+// 	}
+// }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
@@ -238,30 +243,30 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.ReduceNumbers = c.generateReduceNumber(nReduce)
 	c.NMapTask = 0
 	c.NReduceTask = 0
-	c.MapTimeRecords = make([]time.Time, c.NMap)
-	c.MapRecordLocks = make([]sync.Mutex, c.NMap)
-	c.MapFinishStatus = make([]bool, c.NMap)
-	for i := range c.MapTimeRecords {
-		go func(i int) {
-			c.MapRecordLocks[i].Lock()
-			c.MapTimeRecords[i] = time.Now()
-			c.MapRecordLocks[i].Unlock()
-		}(i)
-	}
-	c.ReduceTimeRecords = make([]time.Time, c.NReduce)
-	c.ReduceRecordLocks = make([]sync.Mutex, c.NReduce)
-	c.ReduceFinishStatus = make([]bool, c.NReduce)
-	for i := range c.ReduceTimeRecords {
-		go func(i int) {
-			c.ReduceRecordLocks[i].Lock()
-			c.ReduceTimeRecords[i] = time.Now()
-			c.ReduceRecordLocks[i].Unlock()
-		}(i)
-	}
+	// c.MapTimeRecords = make([]time.Time, c.NMap)
+	// c.MapRecordLocks = make([]sync.Mutex, c.NMap)
+	// c.MapFinishStatus = make([]bool, c.NMap)
+	// for i := range c.MapTimeRecords {
+	// 	go func(i int) {
+	// 		c.MapRecordLocks[i].Lock()
+	// 		c.MapTimeRecords[i] = time.Now()
+	// 		c.MapRecordLocks[i].Unlock()
+	// 	}(i)
+	// }
+	// c.ReduceTimeRecords = make([]time.Time, c.NReduce)
+	// c.ReduceRecordLocks = make([]sync.Mutex, c.NReduce)
+	// c.ReduceFinishStatus = make([]bool, c.NReduce)
+	// for i := range c.ReduceTimeRecords {
+	// 	go func(i int) {
+	// 		c.ReduceRecordLocks[i].Lock()
+	// 		c.ReduceTimeRecords[i] = time.Now()
+	// 		c.ReduceRecordLocks[i].Unlock()
+	// 	}(i)
+	// }
 	c.finishSetup = true
 	c.server()
-	c.checkMapStatus()
-	c.checkReduceStatus()
+	// c.checkMapStatus()
+	// c.checkReduceStatus()
 
 	return &c
 }

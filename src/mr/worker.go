@@ -40,141 +40,136 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	args := RpcArgs{}
 	// record map start time for each map task
 	reply := RpcReply{}
-	for call("Coordinator.DoMapTask", &args, &reply) {
+	for {
+		if call("Coordinator.DoTask", &args, &reply) {
+			// check the task type
+			if reply.Task == "map" {
+				doMap(mapf, reply.FileName, reply.NReduce, reply.MapNumber)
+				args.Task = "map"
+			} else if reply.Task == "reduce" {
+				doReduce(reducef, reply.NMap, reply.ReduceNumber)
+				args.Task = "reduce"
+			}
+			// notify coordinator that the task is finished
+			call("Coordinator.TaskFinished", &args, &reply)
+		} else {
+			// sleep for 3 seconds and retry
+			time.Sleep(3 * time.Second)
+		}
+	}
+}
 
-		file, err := os.Open(reply.FileName)
+func doMap(mapf func(string, string) []KeyValue, fileName string, NReduce int, mapNumber int) {
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Fatalf("cannot open %v", fileName)
+	}
+
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", fileName)
+	}
+
+	file.Close()
+
+	kva := mapf(fileName, string(content))
+
+	intermediate := make([]*os.File, NReduce)
+	encoders := make([]*json.Encoder, NReduce)
+	splitKv := make([][]KeyValue, NReduce)
+
+	// 4. create intermediate files
+	for i := 0; i < NReduce; i += 1 {
+		tempFilename := fmt.Sprintf("temp-mr-%d-%d", mapNumber, i)
+		tempFile, err := ioutil.TempFile("", tempFilename)
 		if err != nil {
-			log.Fatalf("cannot open %v", reply.FileName)
+			log.Fatalf("cannot create temp file %v", tempFilename)
 		}
+		intermediate[i] = tempFile
+		encoders[i] = json.NewEncoder(tempFile)
+	}
 
-		content, err := ioutil.ReadAll(file)
+	// split key value pairs into buckets
+	for _, kv := range kva {
+		bucket := ihash(kv.Key) % NReduce
+		splitKv[bucket] = append(splitKv[bucket], kv)
+	}
+
+	// 5. write kv to intermediate files
+	for i, bucket := range splitKv {
+		for _, kv := range bucket {
+			err := encoders[i].Encode(&kv)
+			if err != nil {
+				fmt.Println("encode failed")
+			}
+		}
+		intermediate[i].Close()
+	}
+
+	// 6. rename temp files to final files
+	for i := 0; i < NReduce; i += 1 {
+		finalFilename := fmt.Sprintf("mr-%d-%d", mapNumber, i)
+		err := os.Rename(intermediate[i].Name(), finalFilename)
 		if err != nil {
-			log.Fatalf("cannot read %v", reply.FileName)
-		}
-
-		file.Close()
-
-		kva := mapf(reply.FileName, string(content))
-
-		intermediate := make([]*os.File, reply.NReduce)
-		encoders := make([]*json.Encoder, reply.NReduce)
-		splitKv := make([][]KeyValue, reply.NReduce)
-
-		// 4. create intermediate files
-		for i := 0; i < reply.NReduce; i += 1 {
-			tempFilename := fmt.Sprintf("temp-mr-%d-%d", reply.MapNumber, i)
-			tempFile, err := ioutil.TempFile("", tempFilename)
-			if err != nil {
-				log.Fatalf("cannot create temp file %v", tempFilename)
-			}
-			intermediate[i] = tempFile
-			encoders[i] = json.NewEncoder(tempFile)
-		}
-
-		// split key value pairs into buckets
-		for _, kv := range kva {
-			bucket := ihash(kv.Key) % reply.NReduce
-			splitKv[bucket] = append(splitKv[bucket], kv)
-		}
-
-		// 5. write kv to intermediate files
-		for i, bucket := range splitKv {
-			for _, kv := range bucket {
-				err := encoders[i].Encode(&kv)
-				if err != nil {
-					fmt.Println("encode failed")
-				}
-			}
-			intermediate[i].Close()
-		}
-
-		// 6. rename temp files to final files
-		for i := 0; i < reply.NReduce; i += 1 {
-			finalFilename := fmt.Sprintf("mr-%d-%d", reply.MapNumber, i)
-			err := os.Rename(intermediate[i].Name(), finalFilename)
-			if err != nil {
-				log.Fatalf("cannot rename %v", intermediate[i].Name())
-			}
-		}
-		args.MapNumber = reply.MapNumber
-		if call("Coordinator.MapNotify", &args, &reply) {
-			fmt.Println("map notify done", reply.MapNumber)
+			log.Fatalf("cannot rename %v", intermediate[i].Name())
 		}
 	}
 
-	for call("Coordinator.DoReduceTask", &args, &reply) {
-		if !reply.StartReduce {
-			time.Sleep(time.Second * 3)
-			fmt.Print("wait for reduce start\n")
-			reply = RpcReply{}
-		} else {
-			kva := []KeyValue{}
-			for i := 0; i < reply.NMap; i += 1 {
-				filename := fmt.Sprintf("mr-%d-%d", i, reply.ReduceNumber)
-				retry := 0
-				// open file error handling
-				var file *os.File
-				var err error
-				for retry < 3 {
-					file, err = os.Open(filename)
-					if err != nil {
-						log.Fatalf("cannot open %v\n", filename)
-						retry += 1
-						time.Sleep(time.Second * 1)
-					} else {
-						break
-					}
-				}
-				// decode error handling
-				dec := json.NewDecoder(file)
-				for {
-					var kv KeyValue
-					if err := dec.Decode(&kv); err != nil {
-						// EOF
-						break
-					}
-					kva = append(kva, kv)
-				}
+}
 
-				file.Close()
-			}
-
-			sort.Sort(ByKey(kva))
-
-			oname := fmt.Sprintf("temp-mr-out-%d", reply.ReduceNumber)
-			ofile, _ := ioutil.TempFile("", oname)
-
-			for i := 0; i < len(kva); {
-				j := i + 1
-				for j < len(kva) && kva[j].Key == kva[i].Key {
-					j++
-				}
-				values := []string{}
-				for k := i; k < j; k++ {
-					values = append(values, kva[k].Value)
-				}
-				output := reducef(kva[i].Key, values)
-				fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
-
-				i = j
-			}
-			ofile.Close()
-			for i := 0; i < reply.NMap; i += 1 {
-				// remove intermediate files
-				filename := fmt.Sprintf("mr-%d-%d", i, reply.ReduceNumber)
-				if err := os.Remove(filename); err != nil {
-					log.Fatalf("cannot remove %v", filename)
-				}
-			}
-			err := os.Rename(ofile.Name(), fmt.Sprintf("mr-out-%d", reply.ReduceNumber))
-			if err != nil {
-				log.Fatalf("cannot rename %v", ofile.Name())
-			}
-			args.ReduceNumber = reply.ReduceNumber
-			if call("Coordinator.ReduceNotify", &args, &reply) {
-				fmt.Println("reduce notify done", reply.ReduceNumber)
-			}
+func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int) {
+	kva := []KeyValue{}
+	for i := 0; i < NMap; i += 1 {
+		filename := fmt.Sprintf("mr-%d-%d", i, reduceNumber)
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %v\n", filename)
+			panic(err)
 		}
+		// decode error handling
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				// EOF
+				break
+			}
+			kva = append(kva, kv)
+		}
+
+		file.Close()
+	}
+
+	sort.Sort(ByKey(kva))
+
+	oname := fmt.Sprintf("temp-mr-out-%d", reduceNumber)
+	ofile, _ := ioutil.TempFile("", oname)
+
+	for i := 0; i < len(kva); {
+		j := i + 1
+		for j < len(kva) && kva[j].Key == kva[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, kva[k].Value)
+		}
+		output := reducef(kva[i].Key, values)
+		fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
+
+		i = j
+	}
+	ofile.Close()
+	for i := 0; i < NMap; i += 1 {
+		// remove intermediate files
+		filename := fmt.Sprintf("mr-%d-%d", i, reduceNumber)
+		if err := os.Remove(filename); err != nil {
+			log.Fatalf("cannot remove %v", filename)
+		}
+	}
+	err := os.Rename(ofile.Name(), fmt.Sprintf("mr-out-%d", reduceNumber))
+	if err != nil {
+		log.Fatalf("cannot rename %v", ofile.Name())
 	}
 }
 
