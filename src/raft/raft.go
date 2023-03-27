@@ -85,6 +85,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
+	rf.role = 0
 	rf.currentTerm = args.Term
 	reply.Term = rf.currentTerm
 	reply.Success = true
