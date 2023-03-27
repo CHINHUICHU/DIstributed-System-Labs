@@ -259,9 +259,9 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) ticker(timeout time.Duration) {
+func (rf *Raft) ticker() {
 	for !rf.killed() {
-
+		timeout := time.Duration(200+(rand.Int63()%300)) * time.Millisecond
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		switch rf.role {
@@ -344,7 +344,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	electionTimeout := time.Duration(200+(rand.Int63()%300)) * time.Millisecond
 
 	// Your initialization code here (2A, 2B, 2C).
 	/*
@@ -355,7 +354,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	go rf.ticker(electionTimeout)
+	go rf.ticker()
 
 	return rf
 }
