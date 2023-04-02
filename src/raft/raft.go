@@ -62,9 +62,8 @@ type Raft struct {
 	currentTerm int
 	votedFor    int
 	lastContact time.Time
-	voteCount   int
 	timeout     time.Duration
-	votemu      sync.Mutex
+	vote        chan int
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -77,8 +76,7 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int  // currentTerm, for leader to update itself
-	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	Term int // currentTerm, for leader to update itself
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -86,15 +84,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	rf.lastContact = time.Now()
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = false
+
+	if args.Term > rf.currentTerm {
+		rf.role = 0
+		rf.currentTerm = args.Term
 		return
 	}
-	rf.role = 0
-	rf.currentTerm = args.Term
+
 	reply.Term = rf.currentTerm
-	reply.Success = true
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -175,20 +172,30 @@ type RequestVoteReply struct {
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	// Your code here (2A, 2B).
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-		return
+	// fmt.Println("term", rf.currentTerm, rf.me, "received vote request from", args.CandidateId, "term", args.Term)
+
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
+
+	// fmt.Println("term", rf.currentTerm, rf.me, "received vote request from", args.CandidateId, "term", args.Term)
+
+	rf.lastContact = time.Now()
+	reply.VoteGranted = false
+
+	if args.Term > rf.currentTerm {
+		rf.mu.Lock()
+		rf.role = 0
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.mu.Unlock()
 	}
-	rf.currentTerm = args.Term
+
+	// current term >= args.Term
 	reply.Term = rf.currentTerm
-	rf.role = 0
 
 	if rf.votedFor == -1 {
+		fmt.Println("term", rf.currentTerm, rf.me, "voted for", args.CandidateId)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	}
@@ -269,16 +276,12 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) ticker() {
 	for !rf.killed() {
-		rf.timeout = time.Duration(500+(rand.Int63()%200)) * time.Millisecond
 		rf.mu.Lock()
-		// fmt.Println("server", rf.me, "role", rf.role, "term", rf.currentTerm, "timeout", rf.timeout)
+		rf.timeout = time.Duration(rand.Int63()%300+300) * time.Millisecond
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		if rf.role == 0 && time.Since(rf.lastContact) > rf.timeout {
-			rf.voteCount = 0
 			rf.role = 1
-		}
-		if rf.role == 1 {
 			rf.currentTerm++
 			rf.votedFor = rf.me
 			for i := range rf.peers {
@@ -289,41 +292,23 @@ func (rf *Raft) ticker() {
 							CandidateId: rf.me,
 						}
 						reply := &RequestVoteReply{}
-						ok := rf.sendRequestVote(i, args, reply)
-						if ok && reply.VoteGranted {
-							rf.votemu.Lock()
-							rf.voteCount++
-							rf.votemu.Unlock()
+						rf.sendRequestVote(i, args, reply)
+						if reply.VoteGranted {
+							rf.vote <- 1
+						} else {
+							rf.vote <- 0
 						}
 					}(i)
 				}
 			}
-			rf.votemu.Lock()
-			fmt.Println("server", rf.me, "role", rf.role, "term", rf.currentTerm, "voteCount", rf.voteCount)
-			if rf.voteCount > len(rf.peers)/2-1 {
+			count := 1
+			for v := range rf.vote {
+				count += v
+			}
+			if count > len(rf.peers)/2 {
 				rf.role = 2
-			} else {
-				rf.role = 0
-			}
-			rf.votemu.Unlock()
-		}
-		if rf.role == 2 {
-			rf.voteCount = 0
-			for i := range rf.peers {
-				if i != rf.me {
-					go func(i int) {
-						args := &AppendEntriesArgs{
-							Term:     rf.currentTerm,
-							LeaderId: rf.me,
-						}
-						reply := &AppendEntriesReply{}
-						ok := rf.sendAppendEntries(i, args, reply)
-						if !ok {
-							rf.role = 0
-						}
-					}(i)
-				}
-				time.Sleep(100 * time.Millisecond)
+				fmt.Println("term", rf.currentTerm, rf.me, "became leader")
+				go rf.sendHeartbeat()
 			}
 		}
 		// pause for a random amount of time between 50 and 350
@@ -332,6 +317,35 @@ func (rf *Raft) ticker() {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Unlock()
 	}
+}
+
+func (rf *Raft) sendHeartbeat() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		// Your code here (2A)
+		// Check if a leader election should be started.
+		if rf.role == 2 {
+			for i := range rf.peers {
+				if i != rf.me {
+					go func(i int) {
+						args := &AppendEntriesArgs{
+							Term:     rf.currentTerm,
+							LeaderId: rf.me,
+						}
+						reply := &AppendEntriesReply{}
+						rf.sendAppendEntries(i, args, reply)
+					}(i)
+				}
+				time.Sleep(150 * time.Millisecond)
+			}
+		}
+		// pause for a random amount of time between 50 and 350
+		// milliseconds.
+		ms := 50 + (rand.Int63() % 300)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		rf.mu.Unlock()
+	}
+
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -361,6 +375,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	// start ticker goroutine to send heartbeats
+	// go rf.sendHeartbeat()
 
 	return rf
 }
