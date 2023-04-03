@@ -20,7 +20,6 @@ package raft
 import (
 	//	"bytes"
 
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -64,6 +63,7 @@ type Raft struct {
 	lastContact time.Time
 	timeout     time.Duration
 	vote        chan int
+	wg          sync.WaitGroup
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -173,29 +173,22 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	// fmt.Println("term", rf.currentTerm, rf.me, "received vote request from", args.CandidateId, "term", args.Term)
 
-	// rf.mu.Lock()
-	// defer rf.mu.Unlock()
-
-	// fmt.Println("term", rf.currentTerm, rf.me, "received vote request from", args.CandidateId, "term", args.Term)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	rf.lastContact = time.Now()
 	reply.VoteGranted = false
 
 	if args.Term > rf.currentTerm {
-		rf.mu.Lock()
 		rf.role = 0
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.mu.Unlock()
 	}
 
-	// current term >= args.Term
 	reply.Term = rf.currentTerm
 
 	if rf.votedFor == -1 {
-		fmt.Println("term", rf.currentTerm, rf.me, "voted for", args.CandidateId)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	}
@@ -276,16 +269,26 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) ticker() {
 	for !rf.killed() {
+		// pause for a random amount of time between 50 and 350
+		// milliseconds.
+		ms := 50 + (rand.Int63() % 300)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+
 		rf.mu.Lock()
-		rf.timeout = time.Duration(rand.Int63()%300+300) * time.Millisecond
+		rf.timeout = time.Duration(rand.Int63()%300+500) * time.Millisecond
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		if rf.role == 0 && time.Since(rf.lastContact) > rf.timeout {
 			rf.role = 1
+		}
+		if rf.role == 1 {
 			rf.currentTerm++
 			rf.votedFor = rf.me
+			rf.vote = make(chan int, len(rf.peers))
+			rf.wg = sync.WaitGroup{}
 			for i := range rf.peers {
 				if i != rf.me {
+					rf.wg.Add(1)
 					go func(i int) {
 						args := &RequestVoteArgs{
 							Term:        rf.currentTerm,
@@ -295,35 +298,18 @@ func (rf *Raft) ticker() {
 						rf.sendRequestVote(i, args, reply)
 						if reply.VoteGranted {
 							rf.vote <- 1
-						} else {
-							rf.vote <- 0
 						}
+						rf.wg.Done()
 					}(i)
+				} else {
+					rf.vote <- 1
 				}
 			}
-			count := 1
-			for v := range rf.vote {
-				count += v
-			}
-			if count > len(rf.peers)/2 {
+			rf.wg.Wait()
+			if len(rf.vote) > len(rf.peers)/2 {
 				rf.role = 2
-				fmt.Println("term", rf.currentTerm, rf.me, "became leader")
-				go rf.sendHeartbeat()
 			}
 		}
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-		rf.mu.Unlock()
-	}
-}
-
-func (rf *Raft) sendHeartbeat() {
-	for !rf.killed() {
-		rf.mu.Lock()
-		// Your code here (2A)
-		// Check if a leader election should be started.
 		if rf.role == 2 {
 			for i := range rf.peers {
 				if i != rf.me {
@@ -336,16 +322,11 @@ func (rf *Raft) sendHeartbeat() {
 						rf.sendAppendEntries(i, args, reply)
 					}(i)
 				}
-				time.Sleep(150 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			}
 		}
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Unlock()
 	}
-
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -375,9 +356,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
-	// start ticker goroutine to send heartbeats
-	// go rf.sendHeartbeat()
 
 	return rf
 }
