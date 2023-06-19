@@ -4,3 +4,4 @@ api.key
 *-handin.tar.gz
 /src/main/mr_*_*
 /src/main/mr-tmp
+out*

@@ -318,13 +318,10 @@ func (rf *Raft) startElection() {
 		rf.SetLastContact(time.Now())
 		atomic.StoreInt32(&rf.votes, 0)
 		atomic.AddInt32(&rf.votes, 1)
-		// var wg sync.WaitGroup
 		cf := rf.CurrentTerm()
 		for i := range rf.peers {
 			if rf.Role() == Candidate && i != rf.me {
-				// wg.Add(1)
 				go func(i int) {
-					// defer wg.Done()
 					fmt.Printf("- Initial RV: candidate %v request vote from server %v in term: %v time %v\n", rf.me, i, cf, time.Now().UnixMilli())
 					args := &RequestVoteArgs{
 						Term:        cf,
@@ -353,7 +350,6 @@ func (rf *Raft) startElection() {
 		fmt.Printf("- before WG: start check the final result for possibile candidate %v in term max(%v or %v) time %v\n", rf.me, cf, rf.CurrentTerm(), time.Now().UnixMilli())
 
 		time.Sleep(time.Duration(50) * time.Millisecond)
-		// wg.Wait()
 
 		result := int(atomic.LoadInt32(&rf.votes))
 		fmt.Printf("- start check the final result for possibile candidate %v in term max(%v or %v) time %v\n", rf.me, cf, rf.CurrentTerm(), time.Now().UnixMilli())
