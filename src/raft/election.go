@@ -8,7 +8,12 @@ import (
 )
 
 var (
-	ElectionTimeout = 400 + (rand.Int63() % 400)
+	ElectionTimeout = 400 + (rand.Int63() % 500)
+)
+
+const (
+	WaitForVoteFinishedBreak = 50
+	DelayToSendHeartbeat     = 100
 )
 
 // example RequestVote RPC arguments structure.
@@ -17,6 +22,8 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term        int
 	CandidateId int
+	LastLogIdx  int
+	LastLogTerm int
 }
 
 // example RequestVote RPC reply structure.
@@ -55,23 +62,32 @@ func (rf *Raft) SetLastContact(t time.Time) {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// Your code here (2A, 2B)
-	cf := rf.CurrentTerm()
+	currentTerm := rf.CurrentTerm()
 
-	if args.Term < cf {
-		fmt.Printf("- candidate %v term is outdated, term should be %v, me is %v, time: %v\n", args.CandidateId, cf, rf.me, time.Now().UnixMilli())
+	if args.Term < currentTerm {
+		// fmt.Printf("- candidate %v term is outdated, term should be %v, me is %v, time: %v\n", args.CandidateId, currentTerm, rf.me, Timestamp())
+		reply.Term = currentTerm
 		return
-	} else if args.Term > cf {
-		fmt.Printf("- Got vote request from candidate %v, me: %v, role %v, term: %v, time: %v\n", args.CandidateId, rf.me, rf.Role(), cf, time.Now().UnixMilli())
+	} else if args.Term > currentTerm {
+		fmt.Printf("-**Term changed** Got vote request from candidate %v, candidate term %v, me: %v, my term: %v, time: %v\n", args.CandidateId, args.Term, rf.me, currentTerm, Timestamp())
 		rf.SetRole(Follower)
 		rf.SetCurrentTerm(args.Term)
 		rf.Vote(-1)
 	}
 
-	if votedFor := rf.VotedFor(); votedFor == -1 || votedFor == args.CandidateId {
-		fmt.Printf("- %v vote to %v in term %v (vote granted) time %v \n", rf.me, args.CandidateId, rf.CurrentTerm(), time.Now().UnixMilli())
+	// check if candidate's log is more up-to-date
+	logLen := rf.LogLen()
+	isUpToDate := true
+	if logLen > 0 {
+		lastEntry := rf.Log(logLen - 1)
+		isUpToDate = args.LastLogTerm > lastEntry.Term || (args.LastLogTerm == lastEntry.Term && args.LastLogIdx >= logLen-1)
+	}
+	if votedFor := rf.VotedFor(); (votedFor == -1 || votedFor == args.CandidateId) && isUpToDate {
+		// fmt.Printf("before voting: server %v's vote for %v \n", rf.me, rf.VotedFor())
 		rf.Vote(args.CandidateId)
 		reply.VoteGranted = true
 		rf.SetLastContact(time.Now())
+		fmt.Printf("after voting: %v grant vote to candidate %v in term %v, ***reset election timer***, time %v\n", rf.me, rf.VotedFor(), rf.CurrentTerm(), Timestamp())
 	}
 	reply.Term = rf.CurrentTerm()
 }
@@ -109,56 +125,62 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) startElection() {
-	if !rf.killed() && rf.Role() == Candidate {
-		rf.SetCurrentTerm(rf.CurrentTerm() + 1)
-		rf.Vote(rf.me)
-		rf.SetLastContact(time.Now())
-		atomic.StoreInt32(&rf.votes, 0)
-		atomic.AddInt32(&rf.votes, 1)
-		cf := rf.CurrentTerm()
+	if rf.Role() == Candidate {
+		ct := rf.CurrentTerm()
+		fmt.Printf("**Term changed** server %v as candidate, increment term %v to %v time %v ***reset election timer*** \n", rf.me, ct, ct+1, Timestamp())
+		rf.SetCurrentTerm(ct + 1)
+		rf.Vote(rf.me)                // vote for itself
+		rf.SetLastContact(time.Now()) // reset election timer
+		atomic.StoreInt32(&rf.votes, 1)
+		ct = rf.CurrentTerm()
 		for i := range rf.peers {
 			if rf.Role() == Candidate && i != rf.me {
 				go func(i int) {
-					fmt.Printf("- Initial RV: candidate %v request vote from server %v in term: %v time %v\n", rf.me, i, cf, time.Now().UnixMilli())
+					lastLogIdx := -1
+					lastLogTerm := 0
+					if ll := rf.LogLen(); ll > 0 {
+						lastLogIdx = ll - 1
+						lastLogTerm = rf.Log(lastLogIdx).Term
+					}
+
 					args := &RequestVoteArgs{
-						Term:        cf,
+						Term:        ct,
 						CandidateId: rf.me,
+						LastLogIdx:  lastLogIdx,
+						LastLogTerm: lastLogTerm,
 					}
 					reply := &RequestVoteReply{}
 					ok := rf.sendRequestVote(i, args, reply)
-					newcf := rf.CurrentTerm()
-					if newcf != args.Term {
+					newCurrentTerm := rf.CurrentTerm()
+					if newCurrentTerm != args.Term {
 						return
 					}
 					if ok {
-						if reply.Term > newcf {
-							fmt.Printf("- Valid reply term: candidate %v got higher reply term %v from server %v time %v\n", rf.me, reply.Term, i, time.Now().UnixMilli())
+						if reply.Term > newCurrentTerm {
 							rf.SetRole(Follower)
+							fmt.Printf("**Term changed** Candidate convert to follower, me %v my term %v, receiver %v, receiver term %v, time %v\n", rf.me, newCurrentTerm, i, reply.Term, Timestamp())
 							rf.SetCurrentTerm(reply.Term)
+							return
 						}
 						if reply.VoteGranted {
-							fmt.Printf("- Vote Granted: candidate %v got vote from server %v in term %v time %v\n", rf.me, i, cf, time.Now().UnixMilli())
 							atomic.AddInt32(&rf.votes, 1)
 						}
 					}
 				}(i)
 			}
 		}
-		fmt.Printf("- before WG: start check the final result for possibile candidate %v in term max(%v or %v) time %v\n", rf.me, cf, rf.CurrentTerm(), time.Now().UnixMilli())
 
-		time.Sleep(time.Duration(50) * time.Millisecond)
-
+		time.Sleep(time.Duration(WaitForVoteFinishedBreak) * time.Millisecond)
+		// calculate election result
 		result := int(atomic.LoadInt32(&rf.votes))
-		fmt.Printf("- start check the final result for possibile candidate %v in term max(%v or %v) time %v\n", rf.me, cf, rf.CurrentTerm(), time.Now().UnixMilli())
-		if rf.Role() == Candidate && rf.CurrentTerm() == cf {
+		if rf.Role() == Candidate && rf.CurrentTerm() == ct {
 			if result > len(rf.peers)/2 {
-				fmt.Printf("- ELECTED AS LEADER: %v become leader with vote %v in term %v time %v\n", rf.me, result, cf, time.Now().UnixMilli())
+				fmt.Printf("- ### ELECTED AS LEADER: %v become leader with vote %v in term %v my log len %v time %v\n", rf.me, result, ct, rf.LogLen(), Timestamp())
 				rf.SetRole(Leader)
-			} else {
-				fmt.Printf("- NOT ELECTED AS LEADER: %v is still candidate with vote %v in term %v time %v\n", rf.me, result, cf, time.Now().UnixMilli())
+				rf.initLeaderState()
+				time.Sleep(75 * time.Millisecond)
+				go rf.reachAgreement()
 			}
-		} else {
-			fmt.Printf("- Candidate %v convert to follower in term %v time %v\n", rf.me, rf.CurrentTerm(), time.Now().UnixMilli())
 		}
 	}
 }

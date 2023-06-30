@@ -6,7 +6,7 @@ package raft
 //
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (index, term, isLeader)
 //   start agreement on a new log entry
 // rf.GetState() (term, isLeader)
 //   ask a Raft for its current term, and whether it thinks it is leader
@@ -38,7 +38,12 @@ import (
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
 const (
-	HeartBeatInterval = 150
+	HeartBeatInterval = 100
+	CheckInterval     = 10
+)
+
+var (
+	Ticker = 50 + rand.Int63()%300
 )
 
 type ApplyMsg struct {
@@ -69,78 +74,39 @@ type Raft struct {
 	currentTerm int
 	votedFor    int
 	votes       int32
+
+	log         []Entry
+	commitIndex int
+	lastApplied int
+
+	applych chan ApplyMsg
+
+	nextIndex  []int
+	matchIndex []int
+	seen       map[interface{}]int
 }
 
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
-// this function should return gracefully.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
-
-	return index, term, isLeader
+type Entry struct {
+	Term    int
+	Command interface{}
 }
 
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-
+		time.Sleep(time.Duration(Ticker) * time.Millisecond)
+		fmt.Printf("### %v reset election timeout time %v\n", rf.me, Timestamp())
 		timeout := time.Duration(ElectionTimeout) * time.Millisecond
 
 		for {
-			elapsedTime := time.Since(rf.LastContact())
-			if elapsedTime > timeout && rf.Role() != Leader {
-				cf := rf.CurrentTerm()
-				fmt.Printf("- START ELECTION: election timeout in term %v, %v start election, time %v\n", cf, rf.me, time.Now().UnixMilli())
+			if time.Since(rf.LastContact()) > timeout && rf.Role() != Leader {
+				fmt.Printf("start election, me %v, my role %v term %v\n", rf.me, rf.Role(), rf.CurrentTerm())
 				rf.SetRole(Candidate)
+				// fmt.Printf("### %v start election, elapsed time %v, timeout %v , time %v\n", rf.me, time.Since(rf.LastContact()).Milliseconds(), timeout, Timestamp())
 				go rf.startElection()
 				break
 			}
-			time.Sleep(time.Duration(30) * time.Millisecond)
-		}
-	}
-}
-
-func (rf *Raft) sendHeartbeat() {
-	for !rf.killed() {
-		cf := rf.CurrentTerm()
-		for i := range rf.peers {
-			if rf.Role() == Leader {
-				go func(i int) {
-					fmt.Printf("- Initial HB: %v send hb to %v in term %v time %v\n", rf.me, i, cf, time.Now().UnixMilli())
-					args := &AppendEntriesArgs{
-						Term: cf,
-					}
-					reply := &AppendEntriesReply{}
-					ok := rf.sendAppendEntries(i, args, reply)
-					newcf := rf.CurrentTerm()
-					if newcf != args.Term {
-						return
-					}
-					if ok {
-						if reply.Term > newcf {
-							rf.SetRole(Follower)
-							rf.SetCurrentTerm(reply.Term)
-							fmt.Printf("- LEADER STEP DOWN: %v step down in term %v time %v\n", rf.me, reply.Term, time.Now().UnixMilli())
-						}
-					}
-				}(i)
-				time.Sleep(HeartBeatInterval * time.Millisecond)
-			}
+			time.Sleep(CheckInterval * time.Millisecond)
 		}
 	}
 }
@@ -157,12 +123,18 @@ func (rf *Raft) sendHeartbeat() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-	rf.votedFor = -1
-	rf.lastContact = time.Now()
+	rf := &Raft{
+		peers:       peers,
+		persister:   persister,
+		me:          me,
+		votedFor:    -1,
+		lastContact: time.Now(),
+		applych:     applyCh,
+		log:         make([]Entry, 0),
+		seen:        make(map[interface{}]int),
+		lastApplied: -1,
+		commitIndex: -1,
+	}
 
 	// Your initialization code here (2A, 2B, 2C).
 
@@ -172,9 +144,83 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
-	// go rf.startElection()
+	go rf.applier()
 
-	go rf.sendHeartbeat()
+	// only leader run the routines
+
+	go rf.checkCommitIndex()
+
+	go rf.updateSeen()
 
 	return rf
+}
+
+func (rf *Raft) applier() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.commitIndex > rf.lastApplied {
+			rf.lastApplied++
+			applyIndex := rf.lastApplied + 1
+			e := rf.log[rf.lastApplied]
+			am := ApplyMsg{
+				CommandValid: true,
+				Command:      e.Command,
+				CommandIndex: applyIndex,
+			}
+			rf.mu.Unlock()
+			rf.applych <- am
+		} else {
+			rf.mu.Unlock()
+		}
+		time.Sleep(CheckInterval * time.Millisecond)
+	}
+}
+
+func (rf *Raft) checkCommitIndex() {
+	for !rf.killed() {
+		if rf.Role() == Leader && rf.isLeaderReady() && rf.LogLen() > 0 {
+			var idx int
+			ci := rf.CommitIndex()
+
+			for i := rf.LogLen() - 1; i > ci; i-- {
+				count := 0
+				for p := range rf.peers {
+					if rf.MatchIndex(p) >= i {
+						count++
+					}
+				}
+				if count > len(rf.peers)/2 {
+					idx = i
+					break
+				}
+			}
+
+			if ct := rf.CurrentTerm(); rf.Log(idx).Term == ct && idx > ci {
+				fmt.Printf("- leader (me %v) increase commit index to %v in term %v time %v\n", rf.me, idx, ct, Timestamp())
+				rf.SetCommitIndex(idx)
+			}
+
+			time.Sleep(CheckInterval * time.Millisecond)
+		}
+	}
+}
+
+func (rf *Raft) updateSeen() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		for i, e := range rf.log {
+			if idx, ok := rf.seen[e.Command]; !ok || idx != i {
+				rf.seen[e.Command] = i
+			}
+		}
+
+		for k, v := range rf.seen {
+			if v < 0 || v >= len(rf.log) || rf.log[v].Command != k {
+				delete(rf.seen, k)
+			}
+		}
+
+		rf.mu.Unlock()
+		time.Sleep(CheckInterval * time.Millisecond)
+	}
 }
