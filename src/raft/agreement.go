@@ -18,10 +18,6 @@ import (
 // term. the third return value is true if this server believes it is
 // the leader.
 
-const (
-	Multiplier = 2
-)
-
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
@@ -41,8 +37,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 
 		var index int
-
-		// ll := rf.LogLen()
 
 		if i, ok := rf.Seen()[command]; ok {
 
@@ -84,7 +78,7 @@ func (rf *Raft) reachAgreement() {
 				if i != rf.me {
 					ni := rf.NextIndex(i)
 					go rf.appendLogRoutine(i, ni)
-					time.Sleep(HeartBeatInterval * time.Millisecond)
+					time.Sleep(HeartBeatInterval)
 				}
 			}
 		}

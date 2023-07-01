@@ -38,8 +38,8 @@ import (
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
 const (
-	HeartBeatInterval = 100
-	CheckInterval     = 10
+	HeartBeatInterval = 100 * time.Millisecond
+	CheckInterval     = 10 * time.Millisecond
 )
 
 var (
@@ -106,7 +106,7 @@ func (rf *Raft) ticker() {
 				go rf.startElection()
 				break
 			}
-			time.Sleep(CheckInterval * time.Millisecond)
+			time.Sleep(CheckInterval)
 		}
 	}
 }
@@ -172,7 +172,7 @@ func (rf *Raft) applier() {
 		} else {
 			rf.mu.Unlock()
 		}
-		time.Sleep(CheckInterval * time.Millisecond)
+		time.Sleep(CheckInterval)
 	}
 }
 
@@ -200,7 +200,7 @@ func (rf *Raft) checkCommitIndex() {
 				rf.SetCommitIndex(idx)
 			}
 
-			time.Sleep(CheckInterval * time.Millisecond)
+			time.Sleep(CheckInterval)
 		}
 	}
 }
@@ -221,6 +221,6 @@ func (rf *Raft) updateSeen() {
 		}
 
 		rf.mu.Unlock()
-		time.Sleep(CheckInterval * time.Millisecond)
+		time.Sleep(CheckInterval)
 	}
 }

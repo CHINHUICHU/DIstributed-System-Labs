@@ -8,12 +8,12 @@ import (
 )
 
 var (
-	ElectionTimeout = 400 + (rand.Int63() % 500)
+	ElectionTimeout = 400 + (rand.Int63() % 400)
 )
 
 const (
-	WaitForVoteFinishedBreak = 50
-	DelayToSendHeartbeat     = 100
+	WaitForVotingFinishedBreak = 50 * time.Millisecond
+	DelayToSendHeartbeat       = 75 * time.Millisecond
 )
 
 // example RequestVote RPC arguments structure.
@@ -61,35 +61,36 @@ func (rf *Raft) SetLastContact(t time.Time) {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
-	// Your code here (2A, 2B)
-	currentTerm := rf.CurrentTerm()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	if args.Term < currentTerm {
-		// fmt.Printf("- candidate %v term is outdated, term should be %v, me is %v, time: %v\n", args.CandidateId, currentTerm, rf.me, Timestamp())
-		reply.Term = currentTerm
+	// Your code here (2A, 2B)
+
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
 		return
-	} else if args.Term > currentTerm {
-		fmt.Printf("-**Term changed** Got vote request from candidate %v, candidate term %v, me: %v, my term: %v, time: %v\n", args.CandidateId, args.Term, rf.me, currentTerm, Timestamp())
-		rf.SetRole(Follower)
-		rf.SetCurrentTerm(args.Term)
-		rf.Vote(-1)
+	} else if args.Term > rf.currentTerm {
+		fmt.Printf("-**Term changed** Got vote request from candidate %v, candidate term %v, me: %v, my term: %v, time: %v\n", args.CandidateId, args.Term, rf.me, rf.currentTerm, Timestamp())
+		rf.role = Follower
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
 	}
 
 	// check if candidate's log is more up-to-date
-	logLen := rf.LogLen()
+	logLen := len(rf.log)
 	isUpToDate := true
 	if logLen > 0 {
-		lastEntry := rf.Log(logLen - 1)
+		lastEntry := rf.log[logLen-1]
 		isUpToDate = args.LastLogTerm > lastEntry.Term || (args.LastLogTerm == lastEntry.Term && args.LastLogIdx >= logLen-1)
 	}
-	if votedFor := rf.VotedFor(); (votedFor == -1 || votedFor == args.CandidateId) && isUpToDate {
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && isUpToDate {
 		// fmt.Printf("before voting: server %v's vote for %v \n", rf.me, rf.VotedFor())
-		rf.Vote(args.CandidateId)
+		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-		rf.SetLastContact(time.Now())
-		fmt.Printf("after voting: %v grant vote to candidate %v in term %v, ***reset election timer***, time %v\n", rf.me, rf.VotedFor(), rf.CurrentTerm(), Timestamp())
+		rf.lastContact = time.Now()
+		fmt.Printf("after voting: %v grant vote to candidate %v in term %v, ***reset election timer***, time %v\n", rf.me, rf.votedFor, rf.currentTerm, Timestamp())
 	}
-	reply.Term = rf.CurrentTerm()
+	reply.Term = rf.currentTerm
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -126,13 +127,14 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) startElection() {
 	if rf.Role() == Candidate {
-		ct := rf.CurrentTerm()
-		fmt.Printf("**Term changed** server %v as candidate, increment term %v to %v time %v ***reset election timer*** \n", rf.me, ct, ct+1, Timestamp())
-		rf.SetCurrentTerm(ct + 1)
-		rf.Vote(rf.me)                // vote for itself
-		rf.SetLastContact(time.Now()) // reset election timer
+		rf.mu.Lock()
+		rf.currentTerm++
+		rf.lastContact = time.Now()
+		rf.votedFor = rf.me
+		rf.mu.Unlock()
+		// fmt.Printf("**Term changed** server %v as candidate, increment term %v to %v time %v ***reset election timer*** \n", rf.me, ct, ct+1, Timestamp())
 		atomic.StoreInt32(&rf.votes, 1)
-		ct = rf.CurrentTerm()
+		ct := rf.CurrentTerm()
 		for i := range rf.peers {
 			if rf.Role() == Candidate && i != rf.me {
 				go func(i int) {
@@ -142,7 +144,6 @@ func (rf *Raft) startElection() {
 						lastLogIdx = ll - 1
 						lastLogTerm = rf.Log(lastLogIdx).Term
 					}
-
 					args := &RequestVoteArgs{
 						Term:        ct,
 						CandidateId: rf.me,
@@ -170,17 +171,29 @@ func (rf *Raft) startElection() {
 			}
 		}
 
-		time.Sleep(time.Duration(WaitForVoteFinishedBreak) * time.Millisecond)
+		time.Sleep(WaitForVotingFinishedBreak)
 		// calculate election result
-		result := int(atomic.LoadInt32(&rf.votes))
-		if rf.Role() == Candidate && rf.CurrentTerm() == ct {
+		for i := 0; rf.Role() == Candidate && rf.CurrentTerm() == ct && i < 10; i++ {
+			result := int(atomic.LoadInt32(&rf.votes))
 			if result > len(rf.peers)/2 {
 				fmt.Printf("- ### ELECTED AS LEADER: %v become leader with vote %v in term %v my log len %v time %v\n", rf.me, result, ct, rf.LogLen(), Timestamp())
-				rf.SetRole(Leader)
-				rf.initLeaderState()
-				time.Sleep(75 * time.Millisecond)
+				rf.mu.Lock()
+				rf.role = Leader
+				rf.nextIndex = make([]int, len(rf.peers))
+				for i := range rf.peers {
+					rf.nextIndex[i] = len(rf.log) // last log
+				}
+				rf.matchIndex = make([]int, len(rf.peers))
+				for i := range rf.peers {
+					rf.matchIndex[i] = -1
+				}
+				rf.matchIndex[rf.me] = len(rf.log) - 1
+				rf.mu.Unlock()
+				time.Sleep(DelayToSendHeartbeat)
 				go rf.reachAgreement()
+				return
 			}
+			time.Sleep(CheckInterval)
 		}
 	}
 }
