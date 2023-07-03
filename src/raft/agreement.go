@@ -26,10 +26,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if !isLeader {
 		return index, term, isLeader
 	}
-	term = rf.CurrentTerm()
+
 	// Your code here (2B).
 	if !rf.killed() && rf.isLeaderReady() {
 		// append entry to local log
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		term = rf.currentTerm
+
 		fmt.Printf("- Leader (me: %v) is alive in term %v and start to append entry to local log, time %v\n", rf.me, term, Timestamp())
 		entry := Entry{
 			Term:    term,
@@ -38,33 +43,28 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 		var index int
 
-		if i, ok := rf.Seen()[command]; ok {
+		if i, ok := rf.seen[command]; ok {
 
-			fmt.Printf("client retried...., previous entry info term %v, index %v, command %v\n", rf.Log(i).Term, i, command)
+			fmt.Printf("client retried...., previous entry info term %v, index %v, command %v\n", rf.log[i].Term, i, command)
 
 			e := Entry{
-				Term:    rf.CurrentTerm(),
+				Term:    term,
 				Command: command,
 			}
-
-			rf.SetLog(i, e)
+			rf.log[i] = e
 			index = i
 		} else {
-			rf.appendLog([]Entry{entry})
-			index = rf.LogLen() - 1
-			rf.SetNextIndex(rf.me, index+1)
-			rf.SetMatchIndex(rf.me, index)
+			rf.log = append(rf.log, entry)
+			index = len(rf.log) - 1
+			rf.nextIndex[rf.me] = index + 1
+			rf.matchIndex[rf.me] = index
 		}
 
-		fmt.Printf("-------Leader %v update matchIndex to %v-----------\n", rf.me, index)
-
-		fmt.Printf("------- leader %v check log in term %v -------\n", rf.me, rf.CurrentTerm())
-		ll := rf.LogLen()
-		for i := 0; i < ll; i++ {
-			e := rf.Log(i)
+		fmt.Printf("------- leader %v check log in term %v -------\n", rf.me, rf.currentTerm)
+		for i, e := range rf.log {
 			fmt.Printf("index %v, command %v, term %v\n", i, e.Command, e.Term)
 		}
-		fmt.Printf("------- leader %v check log in term %v finished-------\n", rf.me, rf.CurrentTerm())
+		fmt.Printf("------- leader %v check log in term %v finished-------\n", rf.me, rf.currentTerm)
 
 		return index + 1, term, isLeader
 	}
@@ -73,10 +73,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) reachAgreement() {
 	for !rf.killed() {
-		if rf.Role() == Leader && rf.isLeaderReady() {
+		if rf.isLeaderReady() {
+			startAppendTerm := rf.CurrentTerm()
 			for i := range rf.peers {
-				if i != rf.me {
-					ni := rf.NextIndex(i)
+				if i != rf.me && rf.CurrentTerm() == startAppendTerm && rf.Role() == Leader {
+					rf.mu.Lock()
+					ni := rf.nextIndex[i]
+					rf.mu.Unlock()
 					go rf.appendLogRoutine(i, ni)
 					time.Sleep(HeartBeatInterval)
 				}
@@ -86,28 +89,29 @@ func (rf *Raft) reachAgreement() {
 }
 
 func (rf *Raft) appendLogRoutine(i int, ni int) {
-	term := rf.CurrentTerm()
-	ll := rf.LogLen()
+	rf.mu.Lock()
+	term := rf.currentTerm
+	ll := len(rf.log)
 	if ni > ll {
 		ni = ll
 	}
-	entries := rf.retrieveLog(ni, ll)
+	entries := rf.log[ni:]
 	prevLogIdx := ni - 1
 	prevLogTerm := 0
 	if prevLogIdx >= 0 {
-		prevLogTerm = rf.Log(prevLogIdx).Term
+		prevLogTerm = rf.log[prevLogIdx].Term
 	}
-	li := rf.CommitIndex()
 	args := &AppendEntriesArgs{
 		Term:         term,
 		LeaderId:     rf.me,
 		PrevLogIndex: prevLogIdx,
 		PrevLogTerm:  prevLogTerm,
 		Entries:      entries,
-		LeaderCommit: li,
+		LeaderCommit: rf.commitIndex,
 	}
 	reply := &AppendEntriesReply{}
-	// fmt.Printf("leader %v send out AE rpc to server %v in term %v, time %v\n", rf.me, i, rf.CurrentTerm(), Timestamp())
+	rf.mu.Unlock()
+	fmt.Printf("leader %v send out AE rpc to server %v in term %v, time %v\n", rf.me, i, rf.currentTerm, Timestamp())
 	ok := rf.sendAppendEntries(i, args, reply)
 	term = rf.CurrentTerm()
 	if term != args.Term {
@@ -117,27 +121,21 @@ func (rf *Raft) appendLogRoutine(i int, ni int) {
 	if ok {
 		// fmt.Printf("leader %v AE rpc to server %v succeeded term %v, time %v\n", rf.me, i, rf.CurrentTerm(), Timestamp())
 		if reply.Term > term {
-			rf.SetRole(Follower)
-			rf.SetCurrentTerm(reply.Term)
-			fmt.Printf("- **Term changed** LEADER STEP DOWN when append log, IS HB? %v: %v step down in term %v time %v\n", len(entries) == 0, rf.me, reply.Term, Timestamp())
+			rf.mu.Lock()
+			rf.role = Follower
+			rf.currentTerm = reply.Term
+			fmt.Printf("-### role changed LEADER STEP DOWN **Term changed** LEADER STEP DOWN when append log, IS HB? %v: %v step down in term %v time %v\n", len(entries) == 0, rf.me, reply.Term, Timestamp())
+			rf.mu.Unlock()
 			return
 		}
+		rf.mu.Lock()
 		if reply.Success {
 			mi := args.PrevLogIndex + len(args.Entries)
-			rf.SetNextIndex(i, mi+1)
-			rf.SetMatchIndex(i, mi)
-			if len(args.Entries) > 0 {
-				fmt.Printf("- LEADER (me %v) APPEND SUCCESS (HB? %v) to server %v: term %v, set ni = %v, mi = %v, time %v\n", rf.me, len(entries) == 0, i, reply.Term, rf.NextIndex(i), rf.MatchIndex(i), Timestamp())
-			}
+			rf.matchIndex[i] = mi
+			rf.nextIndex[i] = mi + 1
 		} else {
-			fmt.Printf("-------LEADER APPEND FAILED------\n")
-			fmt.Printf("leader %v, index %v, term %v\n", rf.me, args.PrevLogIndex, args.PrevLogTerm)
-			fmt.Printf("follower %v, conflict index %v\n", i, reply.ConflictIndex)
-			fmt.Printf("-------LEADER APPEND FAILED------\n")
-			ll := rf.LogLen()
 			index := -1
-			logs := rf.retrieveLog(0, ll)
-			for i, e := range logs {
+			for i, e := range rf.log {
 				if e.Term == reply.ConflictTerm {
 					index = i + 1
 				}
@@ -146,8 +144,9 @@ func (rf *Raft) appendLogRoutine(i int, ni int) {
 				index = reply.ConflictIndex
 			}
 			fmt.Printf("leader %v set follower %v nextIndex %v\n", rf.me, i, reply.ConflictIndex)
-			rf.SetNextIndex(i, index)
+			rf.nextIndex[i] = index
 		}
+		rf.mu.Unlock()
 	} else {
 		fmt.Printf("leader %v AE rpc to server %v fai/led term %v, time %v\n", rf.me, i, rf.CurrentTerm(), Timestamp())
 	}

@@ -33,9 +33,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.role = Follower
-		fmt.Printf("- **Term changed** leader term higher than me: %v, leader's term: %v time: %v\n", rf.me, args.Term, Timestamp())
+		fmt.Printf("- role changed **Term changed** leader term higher than me: %v, leader's term: %v time: %v\n", rf.me, args.Term, Timestamp())
 	} else if rf.role == Candidate {
-		fmt.Printf("- I (me %v) am candidate in term %v, received hb, convert to follower, time %v\n", rf.me, rf.currentTerm, Timestamp())
+		fmt.Printf("- role changed I (me %v) am candidate in term %v, received hb, convert to follower, time %v\n", rf.me, rf.currentTerm, Timestamp())
 		rf.role = Follower
 	}
 
@@ -67,17 +67,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	newEntries := args.Entries
 	match := 0
 
-	fmt.Printf("leader %v, new entries len %v\n", args.LeaderId, len(newEntries))
+	fmt.Printf("leader %v, new entries len %v, leader commit index %v\n", args.LeaderId, len(newEntries), args.LeaderCommit)
 
 	// AE RPC step 3: truncate follower's if conflicting
 	for i := 0; i < len(args.Entries) && args.PrevLogIndex+i+1 < ll; i++ {
 		fmt.Printf("- server starts processing logs... me: %v, leader's term: %v time: %v\n", rf.me, args.Term, Timestamp())
 		if e := rf.log[args.PrevLogIndex+i+1]; e.Term != args.Entries[i].Term || e.Command != args.Entries[i].Command {
-			// fmt.Print("------Entry conflict, need to truncate------\n")
-			// fmt.Printf("LEADER: %v, command %v, term %v, index %v\n", args.LeaderId, args.Entries[i].Command, args.Entries[i].Term, i)
-			// fmt.Printf("SERVER: %v, command %v, term %v, index %v\n", rf.me, e.Command, e.Term, args.PrevLogIndex+i+1)
-			// fmt.Print("------Entry conflict, need to truncate------\n")
-			rf.log = rf.log[args.PrevLogIndex+i+1:]
+			fmt.Print("------Entry conflict, need to truncate------\n")
+			fmt.Printf("LEADER: %v, command %v, term %v, index %v\n", args.LeaderId, args.Entries[i].Command, args.Entries[i].Term, i)
+			fmt.Printf("SERVER: %v, command %v, term %v, index %v\n", rf.me, e.Command, e.Term, args.PrevLogIndex+i+1)
+			fmt.Print("------Entry conflict, need to truncate------\n")
+			rf.log = rf.log[:args.PrevLogIndex+i+1]
 			break
 		} else {
 			match++
@@ -119,7 +119,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			ci = lastIdx
 		}
 		rf.commitIndex = ci
-		// rf.SetCommitIndex(ci)
 		fmt.Printf("server %v update commit index to min(leader ci: %v, last idx of new entry: %v) in term %v time %v\n", rf.me, args.LeaderCommit, lastIdx, rf.currentTerm, Timestamp())
 	}
 

@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	ElectionTimeout = 400 + (rand.Int63() % 400)
+	ElectionTimeout = 300 + (rand.Int63() % 200)
 )
 
 const (
@@ -70,7 +70,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 		return
 	} else if args.Term > rf.currentTerm {
-		fmt.Printf("-**Term changed** Got vote request from candidate %v, candidate term %v, me: %v, my term: %v, time: %v\n", args.CandidateId, args.Term, rf.me, rf.currentTerm, Timestamp())
+		fmt.Printf("- role changed **Term changed** Got vote request from candidate %v, candidate term %v, me: %v, my term: %v, time: %v\n", args.CandidateId, args.Term, rf.me, rf.currentTerm, Timestamp())
 		rf.role = Follower
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
@@ -131,19 +131,21 @@ func (rf *Raft) startElection() {
 		rf.currentTerm++
 		rf.lastContact = time.Now()
 		rf.votedFor = rf.me
-		rf.mu.Unlock()
 		// fmt.Printf("**Term changed** server %v as candidate, increment term %v to %v time %v ***reset election timer*** \n", rf.me, ct, ct+1, Timestamp())
 		atomic.StoreInt32(&rf.votes, 1)
-		ct := rf.CurrentTerm()
+		ct := rf.currentTerm
+		rf.mu.Unlock()
 		for i := range rf.peers {
 			if rf.Role() == Candidate && i != rf.me {
 				go func(i int) {
 					lastLogIdx := -1
 					lastLogTerm := 0
-					if ll := rf.LogLen(); ll > 0 {
+					rf.mu.Lock()
+					if ll := len(rf.log); ll > 0 {
 						lastLogIdx = ll - 1
-						lastLogTerm = rf.Log(lastLogIdx).Term
+						lastLogTerm = rf.log[lastLogIdx].Term
 					}
+					rf.mu.Unlock()
 					args := &RequestVoteArgs{
 						Term:        ct,
 						CandidateId: rf.me,
@@ -152,15 +154,17 @@ func (rf *Raft) startElection() {
 					}
 					reply := &RequestVoteReply{}
 					ok := rf.sendRequestVote(i, args, reply)
-					newCurrentTerm := rf.CurrentTerm()
-					if newCurrentTerm != args.Term {
+					currentTerm := rf.CurrentTerm()
+					if currentTerm != args.Term {
 						return
 					}
 					if ok {
-						if reply.Term > newCurrentTerm {
-							rf.SetRole(Follower)
-							fmt.Printf("**Term changed** Candidate convert to follower, me %v my term %v, receiver %v, receiver term %v, time %v\n", rf.me, newCurrentTerm, i, reply.Term, Timestamp())
-							rf.SetCurrentTerm(reply.Term)
+						if reply.Term > currentTerm {
+							rf.mu.Lock()
+							rf.role = Follower
+							rf.currentTerm = reply.Term
+							fmt.Printf("**Term changed** Candidate convert to follower, me %v my term %v, receiver %v, receiver term %v, time %v\n", rf.me, currentTerm, i, reply.Term, Timestamp())
+							rf.mu.Unlock()
 							return
 						}
 						if reply.VoteGranted {
@@ -173,10 +177,11 @@ func (rf *Raft) startElection() {
 
 		time.Sleep(WaitForVotingFinishedBreak)
 		// calculate election result
-		for i := 0; rf.Role() == Candidate && rf.CurrentTerm() == ct && i < 10; i++ {
+
+		for i := 0; rf.Role() == Candidate && rf.CurrentTerm() == ct && i < 5; i++ {
 			result := int(atomic.LoadInt32(&rf.votes))
 			if result > len(rf.peers)/2 {
-				fmt.Printf("- ### ELECTED AS LEADER: %v become leader with vote %v in term %v my log len %v time %v\n", rf.me, result, ct, rf.LogLen(), Timestamp())
+				// fmt.Printf("- ### ELECTED AS LEADER: %v become leader with vote %v in term %v my log len %v time %v\n", rf.me, result, ct, rf.LogLen(), Timestamp())
 				rf.mu.Lock()
 				rf.role = Leader
 				rf.nextIndex = make([]int, len(rf.peers))

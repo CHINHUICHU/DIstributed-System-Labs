@@ -99,9 +99,16 @@ func (rf *Raft) ticker() {
 		timeout := time.Duration(ElectionTimeout) * time.Millisecond
 
 		for {
-			if time.Since(rf.LastContact()) > timeout && rf.Role() != Leader {
-				fmt.Printf("start election, me %v, my role %v term %v\n", rf.me, rf.Role(), rf.CurrentTerm())
-				rf.SetRole(Candidate)
+			rf.mu.Lock()
+			elapsed := time.Since(rf.lastContact)
+			role := rf.role
+			rf.mu.Unlock()
+			if elapsed > timeout && role != Leader {
+				// fmt.Printf("start election, me %v, my role %v term %v time %v\n", rf.me, rf.Role(), rf.CurrentTerm(), Timestamp())
+				// rf.SetRole(Candidate)
+				rf.mu.Lock()
+				rf.role = Candidate
+				rf.mu.Unlock()
 				// fmt.Printf("### %v start election, elapsed time %v, timeout %v , time %v\n", rf.me, time.Since(rf.LastContact()).Milliseconds(), timeout, Timestamp())
 				go rf.startElection()
 				break
@@ -167,6 +174,7 @@ func (rf *Raft) applier() {
 				Command:      e.Command,
 				CommandIndex: applyIndex,
 			}
+			fmt.Printf("server %v apply msg, command %v index %v term %v\n", rf.me, am.Command, am.CommandIndex, rf.currentTerm)
 			rf.mu.Unlock()
 			rf.applych <- am
 		} else {
@@ -178,14 +186,16 @@ func (rf *Raft) applier() {
 
 func (rf *Raft) checkCommitIndex() {
 	for !rf.killed() {
-		if rf.Role() == Leader && rf.isLeaderReady() && rf.LogLen() > 0 {
+		rf.mu.Lock()
+		ll := len(rf.log)
+		rf.mu.Unlock()
+		if rf.isLeaderReady() && ll > 0 {
+			rf.mu.Lock()
 			var idx int
-			ci := rf.CommitIndex()
-
-			for i := rf.LogLen() - 1; i > ci; i-- {
+			for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
 				count := 0
 				for p := range rf.peers {
-					if rf.MatchIndex(p) >= i {
+					if rf.matchIndex[p] >= i {
 						count++
 					}
 				}
@@ -195,11 +205,11 @@ func (rf *Raft) checkCommitIndex() {
 				}
 			}
 
-			if ct := rf.CurrentTerm(); rf.Log(idx).Term == ct && idx > ci {
-				fmt.Printf("- leader (me %v) increase commit index to %v in term %v time %v\n", rf.me, idx, ct, Timestamp())
-				rf.SetCommitIndex(idx)
+			if rf.log[idx].Term == rf.currentTerm && idx > rf.commitIndex {
+				fmt.Printf("- leader (me %v) increase commit index to %v in term %v time %v\n", rf.me, idx, rf.currentTerm, Timestamp())
+				rf.commitIndex = idx
 			}
-
+			rf.mu.Unlock()
 			time.Sleep(CheckInterval)
 		}
 	}
