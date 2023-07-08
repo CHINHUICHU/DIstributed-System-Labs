@@ -42,18 +42,15 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	reply := RpcReply{}
 	for {
 		if call("Coordinator.DoTask", &args, &reply) {
-			// check the task type
-			if reply.Task == "map" {
-				doMap(mapf, reply.FileName, reply.NReduce, reply.MapNumber)
-				args.Task = "map"
-				args.MapNumber = reply.MapNumber
-				call("Coordinator.TaskFinished", &args, &reply)
+			if reply.Task == Map {
+				mapper(mapf, reply.FileName, reply.Total[Reduce], reply.TaskNumber)
 			} else {
-				doReduce(reducef, reply.NMap, reply.ReduceNumber)
-				args.Task = "reduce"
-				args.ReduceNumber = reply.ReduceNumber
-				call("Coordinator.TaskFinished", &args, &reply)
+				reducer(reducef, reply.Total[Map], reply.TaskNumber)
 			}
+			args.Task = reply.Task
+			args.TaskNumber = reply.TaskNumber
+			reply = RpcReply{}
+			call("Coordinator.FinishTask", &args, &reply)
 		} else {
 			// sleep for 1 seconds and retry
 			time.Sleep(1 * time.Second)
@@ -62,12 +59,13 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	}
 }
 
-func doMap(mapf func(string, string) []KeyValue, fileName string, NReduce int, mapNumber int) {
+func mapper(mapf func(string, string) []KeyValue, fileName string, NReduce int, mapNumber int) {
 	// 1. read file
 	file, err := os.Open(fileName)
 	if err != nil {
 		log.Fatalf("cannot open %v", fileName)
 	}
+
 	// 2. read file content
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
@@ -92,6 +90,7 @@ func doMap(mapf func(string, string) []KeyValue, fileName string, NReduce int, m
 		intermediate[i] = tempFile
 		encoders[i] = json.NewEncoder(tempFile)
 	}
+
 	// 5. split kv into NReduce buckets
 	for _, kv := range kva {
 		bucket := ihash(kv.Key) % NReduce
@@ -120,7 +119,7 @@ func doMap(mapf func(string, string) []KeyValue, fileName string, NReduce int, m
 
 }
 
-func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int) {
+func reducer(reducef func(string, []string) string, NMap int, reduceNumber int) {
 	kva := []KeyValue{}
 	for i := 0; i < NMap; i += 1 {
 		// 1. read intermediate files
@@ -142,6 +141,7 @@ func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int)
 
 		file.Close()
 	}
+
 	// 3. sort by key
 	sort.Sort(ByKey(kva))
 
@@ -163,6 +163,7 @@ func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int)
 		i = j
 	}
 	ofile.Close()
+
 	// 5. rename temp file to final file
 	for i := 0; i < NMap; i += 1 {
 		filename := fmt.Sprintf("mr-%d-%d", i+1, reduceNumber)
@@ -170,6 +171,7 @@ func doReduce(reducef func(string, []string) string, NMap int, reduceNumber int)
 			log.Fatalf("cannot remove %v", filename)
 		}
 	}
+
 	err := os.Rename(ofile.Name(), fmt.Sprintf("mr-out-%d", reduceNumber))
 	if err != nil {
 		log.Fatalf("cannot rename %v", ofile.Name())
@@ -190,5 +192,4 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	err = c.Call(rpcname, args, reply)
 	return err == nil
-
 }
