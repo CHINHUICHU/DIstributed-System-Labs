@@ -36,52 +36,45 @@ func ihash(key string) int {
 
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
-
-	args := RpcArgs{}
-	// record map start time for each map task
-	reply := RpcReply{}
 	for {
-		if call("Coordinator.DoTask", &args, &reply) {
-			if reply.Task == Map {
-				mapper(mapf, reply.FileName, reply.Total[Reduce], reply.TaskNumber)
-			} else {
-				reducer(reducef, reply.Total[Map], reply.TaskNumber)
-			}
-			args.Task = reply.Task
-			args.TaskNumber = reply.TaskNumber
-			reply = RpcReply{}
-			call("Coordinator.FinishTask", &args, &reply)
+		args := &RpcArgs{}
+		reply := &RpcReply{}
+		call("Coordinator.DoTask", &args, &reply)
+		if reply.Task == Map {
+			mapper(mapf, args, reply)
+		} else if reply.Task == Reduce {
+			reducer(reducef, args, reply)
 		} else {
-			// sleep for 1 seconds and retry
-			time.Sleep(1 * time.Second)
-			reply = RpcReply{}
+			return
 		}
 	}
 }
 
-func mapper(mapf func(string, string) []KeyValue, fileName string, NReduce int, mapNumber int) {
+func mapper(mapf func(string, string) []KeyValue, args *RpcArgs, reply *RpcReply) {
+	fileName, NReduce, mapNumber := reply.FileName, reply.Total[Reduce], reply.TaskNumber
 	// 1. read file
 	file, err := os.Open(fileName)
 	if err != nil {
 		log.Fatalf("cannot open %v", fileName)
 	}
-
 	// 2. read file content
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", fileName)
 	}
-
 	file.Close()
+	fmt.Printf("Mapper %v timestamp before call mapf, time %v\n", mapNumber, timestamp())
+
 	// 3. call mapf
 	kva := mapf(fileName, string(content))
+	fmt.Printf("Mapper %v timestamp after call mapf, time %v\n", mapNumber, timestamp())
 
 	intermediate := make([]*os.File, NReduce)
 	encoders := make([]*json.Encoder, NReduce)
 	splitKv := make([][]KeyValue, NReduce)
 
 	// 4. create intermediate files
-	for i := 0; i < NReduce; i += 1 {
+	for i := 0; i < NReduce; i++ {
 		tempFilename := fmt.Sprintf("temp-mr-%d-%d", mapNumber+1, i)
 		tempFile, err := ioutil.TempFile("", tempFilename)
 		if err != nil {
@@ -102,31 +95,40 @@ func mapper(mapf func(string, string) []KeyValue, fileName string, NReduce int, 
 		for _, kv := range bucket {
 			err := encoders[i].Encode(&kv)
 			if err != nil {
-				fmt.Println("encode failed")
+				fmt.Printf("encode failed\n")
 			}
 		}
 		intermediate[i].Close()
 	}
 
 	// 7. rename temp files to final files
-	for i := 0; i < NReduce; i += 1 {
+	for i := 0; i < NReduce; i++ {
 		finalFilename := fmt.Sprintf("mr-%d-%d", mapNumber+1, i)
 		err := os.Rename(intermediate[i].Name(), finalFilename)
 		if err != nil {
-			log.Fatalf("cannot rename %v", intermediate[i].Name())
+			fmt.Printf("cannot rename %v", intermediate[i].Name())
 		}
 	}
 
+	args = &RpcArgs{
+		Task:       Map,
+		TaskNumber: mapNumber,
+	}
+	reply = &RpcReply{}
+	call("Coordinator.FinishTask", &args, &reply)
+
 }
 
-func reducer(reducef func(string, []string) string, NMap int, reduceNumber int) {
+func reducer(reducef func(string, []string) string, args *RpcArgs, reply *RpcReply) {
+	NMap, reduceNumber := reply.Total[Map], reply.TaskNumber
 	kva := []KeyValue{}
-	for i := 0; i < NMap; i += 1 {
+	for i := 0; i < NMap; i++ {
 		// 1. read intermediate files
 		filename := fmt.Sprintf("mr-%d-%d", i+1, reduceNumber)
 		file, err := os.Open(filename)
 		if err != nil {
-			panic(err)
+			fmt.Printf("reducer can not open, err %v\n", err)
+			return
 		}
 		// 2. decode intermediate files
 		dec := json.NewDecoder(file)
@@ -147,6 +149,8 @@ func reducer(reducef func(string, []string) string, NMap int, reduceNumber int) 
 
 	oname := fmt.Sprintf("temp-mr-out-%d", reduceNumber)
 	ofile, _ := ioutil.TempFile("", oname)
+	fmt.Printf("REDUCER %v timestamp before call reducef, time %v\n", reduceNumber, timestamp())
+
 	// 4. call reducef
 	for i := 0; i < len(kva); {
 		j := i + 1
@@ -163,9 +167,10 @@ func reducer(reducef func(string, []string) string, NMap int, reduceNumber int) 
 		i = j
 	}
 	ofile.Close()
+	fmt.Printf("REDUCER %v timestamp after call reducef, time %v\n", reduceNumber, timestamp())
 
 	// 5. rename temp file to final file
-	for i := 0; i < NMap; i += 1 {
+	for i := 0; i < NMap; i++ {
 		filename := fmt.Sprintf("mr-%d-%d", i+1, reduceNumber)
 		if err := os.Remove(filename); err != nil {
 			log.Fatalf("cannot remove %v", filename)
@@ -176,6 +181,12 @@ func reducer(reducef func(string, []string) string, NMap int, reduceNumber int) 
 	if err != nil {
 		log.Fatalf("cannot rename %v", ofile.Name())
 	}
+	args = &RpcArgs{
+		Task:       Reduce,
+		TaskNumber: reduceNumber,
+	}
+	reply = &RpcReply{}
+	call("Coordinator.FinishTask", &args, &reply)
 }
 
 // send an RPC request to the coordinator, wait for the response.
@@ -192,4 +203,10 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	err = c.Call(rpcname, args, reply)
 	return err == nil
+}
+
+var t0 = time.Now()
+
+func timestamp() int64 {
+	return time.Since(t0).Abs().Milliseconds()
 }
