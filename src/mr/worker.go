@@ -39,14 +39,20 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	for {
 		args := &RpcArgs{}
 		reply := &RpcReply{}
+		pid := os.Getpid()
+		args.WorkerID = pid
+		fmt.Printf("worker (pid=%d) request task, time %v\n", pid, timestamp())
 		call("Coordinator.DoTask", &args, &reply)
+		fmt.Printf("worker (pid=%d) got task %v, number %v, time %v\n", pid, reply.Task, reply.TaskNumber, timestamp())
 		if reply.Task == Map {
 			mapper(mapf, args, reply)
 		} else if reply.Task == Reduce {
 			reducer(reducef, args, reply)
 		} else {
+			fmt.Printf("worker %v exit\n", pid)
 			return
 		}
+		time.Sleep(30 * time.Millisecond)
 	}
 }
 
@@ -166,6 +172,7 @@ func reducer(reducef func(string, []string) string, args *RpcArgs, reply *RpcRep
 
 		i = j
 	}
+
 	ofile.Close()
 	fmt.Printf("REDUCER %v timestamp after call reducef, time %v\n", reduceNumber, timestamp())
 

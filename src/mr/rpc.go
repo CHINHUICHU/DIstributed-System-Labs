@@ -17,6 +17,7 @@ import (
 //
 
 type RpcArgs struct {
+	WorkerID   int
 	Task       TaskType
 	TaskNumber int
 }

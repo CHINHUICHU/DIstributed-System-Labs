@@ -21,7 +21,6 @@ const (
 
 type Coordinator struct {
 	// Your definitions here.
-	start time.Time
 	sync.Mutex
 	files    []string // for retry map task
 	tracker  map[TaskType]map[int]Record
@@ -39,16 +38,17 @@ type Record struct {
 func (c *Coordinator) DoTask(args *RpcArgs, reply *RpcReply) error {
 	reply.Total = c.total
 
+	fmt.Printf("worker %d request task from coordinator time %v\n", args.WorkerID, timestamp())
+
 	defer func() {
-		c.Lock()
 		if reply.Task != Finish {
-			fmt.Printf("assign task type %v, number %v time %v\n", reply.Task, reply.TaskNumber, c.Timestamp())
+			c.Lock()
 			c.tracker[reply.Task][reply.TaskNumber] = Record{
 				assigned: true,
 				time:     time.Now(),
 			}
+			c.Unlock()
 		}
-		c.Unlock()
 	}()
 
 	if !c.isFinished(Map) {
@@ -56,11 +56,16 @@ func (c *Coordinator) DoTask(args *RpcArgs, reply *RpcReply) error {
 		reply.Task = Map
 		reply.FileName = c.files[number]
 		reply.TaskNumber = number
+		fmt.Printf("coordinator assign worker %v map task with number %v, time %v\n", args.WorkerID, reply.TaskNumber, timestamp())
 	} else if !c.isFinished(Reduce) {
 		number := <-c.todos[Reduce]
 		reply.Task = Reduce
 		reply.TaskNumber = number
-	} else {
+		fmt.Printf("coordinator assign worker %v reduce task with number %v, time %v\n", args.WorkerID, reply.TaskNumber, timestamp())
+	}
+	fmt.Printf("coordinator assign worker %v no task time %v\n", args.WorkerID, timestamp())
+	if c.isFinished(Map) && c.isFinished(Reduce) {
+		fmt.Printf("all task finished!!!!!, worker id %v\n", args.WorkerID)
 		reply.Task = Finish
 	}
 	return nil
@@ -73,7 +78,7 @@ func (c *Coordinator) FinishTask(args *RpcArgs, reply *RpcReply) error {
 	if record, ok := c.tracker[args.Task][args.TaskNumber]; ok && !record.done {
 		record.done = true
 		c.tracker[args.Task][args.TaskNumber] = record
-		fmt.Printf("task type %v, task number %v, finished, time %v\n", args.Task, args.TaskNumber, c.Timestamp())
+		fmt.Printf("task type %v, task number %v, finished, time %v\n", args.Task, args.TaskNumber, timestamp())
 		c.finished[args.Task]++
 	}
 	return nil
@@ -134,15 +139,15 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	c.files = append(c.files, files...)
-	c.todos = map[TaskType]chan int{
-		Map:    make(chan int),
-		Reduce: make(chan int),
-	}
-	c.start = time.Now()
 
 	c.total = map[TaskType]int{
 		Map:    len(files),
 		Reduce: nReduce,
+	}
+
+	c.todos = map[TaskType]chan int{
+		Map:    make(chan int, c.total[Map]),
+		Reduce: make(chan int, c.total[Reduce]),
 	}
 
 	for index := range files {
@@ -185,8 +190,4 @@ func (c *Coordinator) isFinished(task TaskType) bool {
 	c.Lock()
 	defer c.Unlock()
 	return c.finished[task] == c.total[task]
-}
-
-func (c *Coordinator) Timestamp() int64 {
-	return time.Since(c.start).Abs().Milliseconds()
 }
