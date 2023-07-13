@@ -40,6 +40,7 @@ import (
 const (
 	HeartBeatInterval = 100 * time.Millisecond
 	CheckInterval     = 10 * time.Millisecond
+	RpcTimeout        = 200 * time.Millisecond
 )
 
 var (
@@ -95,7 +96,7 @@ func (rf *Raft) ticker() {
 	for !rf.killed() {
 
 		time.Sleep(time.Duration(Ticker) * time.Millisecond)
-		fmt.Printf("### %v reset election timeout time %v\n", rf.me, Timestamp())
+		// fmt.Printf("### %v reset election timeout time %v\n", rf.me, Timestamp())
 		timeout := time.Duration(ElectionTimeout) * time.Millisecond
 
 		for {
@@ -105,7 +106,6 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 			if elapsed > timeout && role != Leader {
 				// fmt.Printf("start election, me %v, my role %v term %v time %v\n", rf.me, rf.Role(), rf.CurrentTerm(), Timestamp())
-				// rf.SetRole(Candidate)
 				rf.mu.Lock()
 				rf.role = Candidate
 				rf.mu.Unlock()
@@ -164,21 +164,27 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) applier() {
 	for !rf.killed() {
+		applyEntries := make([]ApplyMsg, 0)
 		rf.mu.Lock()
-		if rf.commitIndex > rf.lastApplied {
-			rf.lastApplied++
-			applyIndex := rf.lastApplied + 1
-			e := rf.log[rf.lastApplied]
-			am := ApplyMsg{
-				CommandValid: true,
-				Command:      e.Command,
-				CommandIndex: applyIndex,
+		for {
+			if rf.commitIndex > rf.lastApplied {
+				rf.lastApplied++
+				applyIndex := rf.lastApplied + 1
+				e := rf.log[rf.lastApplied]
+				am := ApplyMsg{
+					CommandValid: true,
+					Command:      e.Command,
+					CommandIndex: applyIndex,
+				}
+				fmt.Printf("server %v apply msg, command %v index %v term %v time %v\n", rf.me, am.Command, am.CommandIndex, rf.currentTerm, Timestamp())
+				applyEntries = append(applyEntries, am)
+			} else {
+				break
 			}
-			fmt.Printf("server %v apply msg, command %v index %v term %v\n", rf.me, am.Command, am.CommandIndex, rf.currentTerm)
-			rf.mu.Unlock()
+		}
+		rf.mu.Unlock()
+		for _, am := range applyEntries {
 			rf.applych <- am
-		} else {
-			rf.mu.Unlock()
 		}
 		time.Sleep(CheckInterval)
 	}
@@ -187,31 +193,33 @@ func (rf *Raft) applier() {
 func (rf *Raft) checkCommitIndex() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		ll := len(rf.log)
-		rf.mu.Unlock()
-		if rf.isLeaderReady() && ll > 0 {
-			rf.mu.Lock()
-			var idx int
+		if rf.role == Leader && rf.matchIndex != nil && len(rf.log) > 0 {
+			idx := rf.commitIndex
+			// match := make([]int, 0)
 			for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
 				count := 0
+				// checker := make([]int, 0)
 				for p := range rf.peers {
 					if rf.matchIndex[p] >= i {
 						count++
+						// checker = append(checker, p)
 					}
 				}
 				if count > len(rf.peers)/2 {
+					// match = append(match, checker...)
 					idx = i
 					break
 				}
 			}
 
-			if rf.log[idx].Term == rf.currentTerm && idx > rf.commitIndex {
+			if idx >= 0 && rf.log[idx].Term == rf.currentTerm && idx > rf.commitIndex {
 				fmt.Printf("- leader (me %v) increase commit index to %v in term %v time %v\n", rf.me, idx, rf.currentTerm, Timestamp())
+				// fmt.Printf("Log matched with me %v, matched server %v\n", rf.me, match)
 				rf.commitIndex = idx
 			}
-			rf.mu.Unlock()
-			time.Sleep(CheckInterval)
 		}
+		rf.mu.Unlock()
+		time.Sleep(CheckInterval)
 	}
 }
 
