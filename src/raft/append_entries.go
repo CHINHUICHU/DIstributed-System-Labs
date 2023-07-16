@@ -36,16 +36,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.role = Follower
+		rf.matchIndex = nil
+		rf.nextIndex = nil
 		// fmt.Printf("- role changed **Term changed** leader term higher than me: %v, leader's term: %v time: %v\n", rf.me, args.Term, Timestamp())
 	} else if rf.role == Candidate {
 		// fmt.Printf("- role changed I (me %v) am candidate in term %v, received hb, convert to follower, time %v\n", rf.me, rf.currentTerm, Timestamp())
 		rf.role = Follower
+		rf.matchIndex = nil
+		rf.nextIndex = nil
 	}
 
 	ll := len(rf.log)
 	reply.Term = rf.currentTerm
 	rf.lastContact = time.Now()
-	// fmt.Printf("%v received Append Entries RPC from leader %v in term %v, ***reset election timer*** time %v\n", rf.me, args.LeaderId, reply.Term, Timestamp())
+	fmt.Printf("%v received Append Entries RPC from leader %v in term %v, ***reset election timer*** time %v\n", rf.me, args.LeaderId, reply.Term, Timestamp())
 
 	// process RPC
 	// AE RPC step 2: check if entry match at prevLogIndex and prevLogTerm
@@ -71,7 +75,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	newEntries := args.Entries
 	match := 0
 
-	// fmt.Printf("leader %v, new entries len %v, leader commit index %v\n", args.LeaderId, len(newEntries), args.LeaderCommit)
+	fmt.Printf("leader %v, new entries len %v, leader prev log index %v\n", args.LeaderId, len(newEntries), args.PrevLogIndex)
+	fmt.Printf("-------leader's log to append------\n")
+	for i, e := range newEntries {
+		fmt.Printf("leader %v, index %v, command %v, term %v, time %v\n", args.LeaderId, i+args.PrevLogIndex+1, e.Command, e.Term, Timestamp())
+	}
+	fmt.Printf("-------leader's log to append------\n")
 
 	// AE RPC step 3: truncate follower's if conflicting
 	for i := 0; i < len(args.Entries) && args.PrevLogIndex+i+1 < ll; i++ {
@@ -111,18 +120,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// AE PRC step 4: append log
-	if len(rf.log) > 0 {
-		e := rf.log[len(rf.log)-1]
-		fmt.Printf("me %v index %v, command %v, term %v\n", rf.me, len(rf.log)-1, e.Command, e.Term)
-	}
-	// if args.Entries != nil {
-	// 	fmt.Printf("-------follower check log------\n")
-
-	// 	for i, e := range rf.log {
-	// 		fmt.Printf("me %v, index %v, command %v, term %v, time %v\n", rf.me, i, e.Command, e.Term, Timestamp())
-	// 	}
-	// 	fmt.Printf("-------follower check log------\n")
+	// if len(rf.log) > 0 {
+	// 	e := rf.log[len(rf.log)-1]
+	// 	fmt.Printf("me %v index %v, command %v, term %v\n", rf.me, len(rf.log)-1, e.Command, e.Term)
 	// }
+	if args.Entries != nil {
+		fmt.Printf("-------follower check log------\n")
+
+		for i, e := range rf.log {
+			fmt.Printf("me %v, index %v, command %v, term %v, time %v\n", rf.me, i, e.Command, e.Term, Timestamp())
+		}
+		fmt.Printf("-------follower check log------\n")
+	}
 
 	// AE PRC step 5: check commit index
 	if ci := rf.commitIndex; args.LeaderCommit > ci {

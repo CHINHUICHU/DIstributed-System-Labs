@@ -2,7 +2,6 @@ package raft
 
 import (
 	"bytes"
-	"fmt"
 
 	"6.5840/labgob"
 )
@@ -44,10 +43,6 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = term
 		rf.votedFor = votedFor
 		rf.log = log
-		fmt.Printf("--------server read persist me %v term %v-----\n", rf.me, rf.currentTerm)
-		for i, e := range rf.log {
-			fmt.Printf("persist log, me %v, index %v cmd %v term %v\n", rf.me, i, e.Command, e.Term)
-		}
 		rf.mu.Unlock()
 	}
 }

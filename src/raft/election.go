@@ -53,6 +53,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.role = Follower
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.nextIndex = nil
+		rf.matchIndex = nil
 	}
 
 	// check if candidate's log is more up-to-date
@@ -151,7 +153,7 @@ func (rf *Raft) startElection() {
 						time.Sleep(10 * time.Millisecond)
 					}
 					currentTerm := rf.CurrentTerm()
-					if currentTerm != args.Term {
+					if currentTerm != args.Term || rf.Role() != Candidate {
 						return
 					}
 					if success {

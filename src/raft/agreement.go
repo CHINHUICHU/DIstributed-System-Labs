@@ -37,7 +37,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 		term = rf.currentTerm
 
-		// fmt.Printf("- Leader (me: %v) is alive in term %v and start to append entry to local log, time %v\n", rf.me, term, Timestamp())
 		entry := Entry{
 			Term:    term,
 			Command: command,
@@ -65,10 +64,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 		// fmt.Printf("------- leader %v check log in term %v -------\n", rf.me, rf.currentTerm)
 		// for i, e := range rf.log {
-		if len(rf.log) > 0 {
-			e := rf.log[len(rf.log)-1]
-			fmt.Printf("me %v index %v, command %v, term %v\n", rf.me, len(rf.log)-1, e.Command, e.Term)
-		}
+		// 	// if len(rf.log) > 0 {
+		// 	// 	e := rf.log[len(rf.log)-1]
+		// 	fmt.Printf("me %v index %v, command %v, term %v\n", rf.me, i, e.Command, e.Term)
+		// 	// }
 		// }
 		// fmt.Printf("------- leader %v check log in term %v finished-------\n", rf.me, rf.currentTerm)
 
@@ -84,7 +83,7 @@ func (rf *Raft) reachAgreement() {
 			for i := range rf.peers {
 				if i != rf.me && rf.CurrentTerm() == startAppendTerm && rf.Role() == Leader {
 					go rf.appendLogRoutine(i)
-					time.Sleep(HeartBeatInterval)
+					time.Sleep(AppendInterval)
 				}
 			}
 		}
@@ -93,9 +92,15 @@ func (rf *Raft) reachAgreement() {
 
 func (rf *Raft) appendLogRoutine(i int) {
 	// this routine will at least run once for heartbeat
-	shouldContinue := true
+	rf.mu.Lock()
+	shouldContinue := true && rf.role == Leader && rf.nextIndex != nil && rf.matchIndex != nil
+	rf.mu.Unlock()
 	for shouldContinue {
 		rf.mu.Lock()
+		if rf.role != Leader || rf.nextIndex == nil || rf.matchIndex == nil {
+			rf.mu.Unlock()
+			return
+		}
 		ni := rf.nextIndex[i]
 		term := rf.currentTerm
 		ll := len(rf.log)
@@ -118,7 +123,6 @@ func (rf *Raft) appendLogRoutine(i int) {
 		}
 		reply := &AppendEntriesReply{}
 		rf.mu.Unlock()
-		// fmt.Printf("leader %v send out AE rpc to server %v in term %v, time %v\n", rf.me, i, rf.currentTerm, Timestamp())
 		replied := make(chan bool, 1)
 		success := true
 		start := time.Now()
@@ -136,30 +140,34 @@ func (rf *Raft) appendLogRoutine(i int) {
 			}
 			time.Sleep(CheckInterval)
 		}
-		// ok := rf.sendAppendEntries(i, args, reply)
 		term = rf.CurrentTerm()
-		if term != args.Term {
-			// fmt.Printf("leader %v send server %v append entries RPC outdated in term %v\n", rf.me, i, term)
+		rf.mu.Lock()
+		isOutdated := term != args.Term ||
+			rf.role != Leader ||
+			rf.nextIndex == nil ||
+			rf.matchIndex == nil ||
+			rf.nextIndex[i] != args.PrevLogIndex+1
+		rf.mu.Unlock()
+		// the RPC outdated
+		if isOutdated {
 			return
 		}
 		if success {
-			// fmt.Printf("leader %v AE rpc to server %v succeeded term %v, time %v\n", rf.me, i, rf.CurrentTerm(), Timestamp())
 			if reply.Term > term {
 				rf.mu.Lock()
 				rf.role = Follower
 				rf.currentTerm = reply.Term
 				rf.persist()
-				// fmt.Printf("-### role changed LEADER STEP DOWN **Term changed** LEADER STEP DOWN when append log, IS HB? %v: %v step down in term %v time %v\n", len(entries) == 0, rf.me, reply.Term, Timestamp())
 				rf.mu.Unlock()
 				return
 			}
 			rf.mu.Lock()
 			if reply.Success {
 				mi := args.PrevLogIndex + len(args.Entries)
-				fmt.Printf("append success, leader %v update server %v match index to %v, elapsed time %v\n", rf.me, i, mi, time.Since(start).Abs().Milliseconds())
+				fmt.Printf("append success, leader %v update server %v match index to %v time %v\n", rf.me, i, mi, Timestamp())
 				rf.matchIndex[i] = mi
 				rf.nextIndex[i] = mi + 1
-				if ll-1 < rf.nextIndex[i] {
+				if ll-1 < rf.nextIndex[i] || len(args.Entries) == 0 {
 					shouldContinue = false
 				}
 			} else {
@@ -172,13 +180,11 @@ func (rf *Raft) appendLogRoutine(i int) {
 				if index == -1 {
 					index = reply.ConflictIndex
 				}
-				fmt.Printf("append failed, leader %v set follower %v nextIndex %v, elapsed time %v\n", rf.me, i, reply.ConflictIndex, time.Since(start).Abs().Milliseconds())
+				fmt.Printf("append failed, leader %v set follower %v nextIndex %v\n", rf.me, i, reply.ConflictIndex)
 				rf.nextIndex[i] = index
 			}
 			rf.mu.Unlock()
-		} else {
-			// fmt.Printf("leader %v AE rpc to server %v fai/led term %v, time %v\n", rf.me, i, rf.CurrentTerm(), Timestamp())
+			time.Sleep(AppendInterval)
 		}
-		time.Sleep(HeartBeatInterval)
 	}
 }

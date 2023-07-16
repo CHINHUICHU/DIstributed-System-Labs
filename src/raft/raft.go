@@ -38,9 +38,9 @@ import (
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
 const (
-	HeartBeatInterval = 100 * time.Millisecond
-	CheckInterval     = 10 * time.Millisecond
-	RpcTimeout        = 200 * time.Millisecond
+	CheckInterval  = 10 * time.Millisecond
+	RpcTimeout     = 150 * time.Millisecond
+	AppendInterval = 10 * time.Millisecond
 )
 
 var (
@@ -85,18 +85,20 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 	seen       map[interface{}]int
+
+	highestSnapshot int
 }
 
 type Entry struct {
 	Term    int
 	Command interface{}
+	// Index   int
 }
 
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 
 		time.Sleep(time.Duration(Ticker) * time.Millisecond)
-		// fmt.Printf("### %v reset election timeout time %v\n", rf.me, Timestamp())
 		timeout := time.Duration(ElectionTimeout) * time.Millisecond
 
 		for {
@@ -105,11 +107,9 @@ func (rf *Raft) ticker() {
 			role := rf.role
 			rf.mu.Unlock()
 			if elapsed > timeout && role != Leader {
-				// fmt.Printf("start election, me %v, my role %v term %v time %v\n", rf.me, rf.Role(), rf.CurrentTerm(), Timestamp())
 				rf.mu.Lock()
 				rf.role = Candidate
 				rf.mu.Unlock()
-				// fmt.Printf("### %v start election, elapsed time %v, timeout %v , time %v\n", rf.me, time.Since(rf.LastContact()).Milliseconds(), timeout, Timestamp())
 				go rf.startElection()
 				break
 			}
@@ -131,22 +131,26 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 
 	rf := &Raft{
-		peers:       peers,
-		persister:   persister,
-		me:          me,
-		votedFor:    -1,
-		lastContact: time.Now(),
-		applych:     applyCh,
-		log:         make([]Entry, 0),
-		seen:        make(map[interface{}]int),
-		lastApplied: -1,
-		commitIndex: -1,
+		peers:           peers,
+		persister:       persister,
+		me:              me,
+		votedFor:        -1,
+		lastContact:     time.Now(),
+		applych:         applyCh,
+		log:             make([]Entry, 0),
+		seen:            make(map[interface{}]int),
+		lastApplied:     -1,
+		commitIndex:     -1,
+		highestSnapshot: -1,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.mu.Lock()
+	fmt.Printf("I am back, me %v, term %v\n", rf.me, rf.currentTerm)
+	rf.mu.Unlock()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -157,7 +161,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.checkCommitIndex()
 
-	go rf.updateSeen()
+	// go rf.updateSeen()
 
 	return rf
 }
@@ -223,22 +227,22 @@ func (rf *Raft) checkCommitIndex() {
 	}
 }
 
-func (rf *Raft) updateSeen() {
-	for !rf.killed() {
-		rf.mu.Lock()
-		for i, e := range rf.log {
-			if idx, ok := rf.seen[e.Command]; !ok || idx != i {
-				rf.seen[e.Command] = i
-			}
-		}
+// func (rf *Raft) updateSeen() {
+// 	for !rf.killed() {
+// 		rf.mu.Lock()
+// 		for i, e := range rf.log {
+// 			if idx, ok := rf.seen[e.Command]; !ok || idx != i {
+// 				rf.seen[e.Command] = i
+// 			}
+// 		}
 
-		for k, v := range rf.seen {
-			if v < 0 || v >= len(rf.log) || rf.log[v].Command != k {
-				delete(rf.seen, k)
-			}
-		}
+// 		for k, v := range rf.seen {
+// 			if v < 0 || v >= len(rf.log) || rf.log[v].Command != k {
+// 				delete(rf.seen, k)
+// 			}
+// 		}
 
-		rf.mu.Unlock()
-		time.Sleep(CheckInterval)
-	}
-}
+// 		rf.mu.Unlock()
+// 		time.Sleep(CheckInterval)
+// 	}
+// }
