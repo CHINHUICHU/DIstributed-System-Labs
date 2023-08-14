@@ -104,7 +104,8 @@ func (rf *Raft) ticker() {
 	for !rf.killed() {
 		ms := 50 + rand.Int63()%300
 		time.Sleep(time.Duration(ms) * time.Millisecond)
-		timeout := time.Duration(ElectionTimeout) * time.Millisecond
+		ms = 300 + (rand.Int63() % 200)
+		timeout := time.Duration(ms) * time.Millisecond
 		for {
 			rf.mu.Lock()
 			elapsed := time.Since(rf.lastContact)
@@ -191,9 +192,11 @@ func (rf *Raft) applier() {
 			}
 		}
 		rf.mu.Unlock()
-		for _, am := range applyEntries {
-			rf.applych <- am
-		}
+		go func(applyEntries []ApplyMsg) {
+			for _, am := range applyEntries {
+				rf.applych <- am
+			}
+		}(applyEntries)
 		time.Sleep(CheckInterval)
 	}
 }
@@ -202,7 +205,6 @@ func (rf *Raft) checkCommitIndex() {
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.role == Leader && rf.matchIndex != nil && len(rf.log) > 0 {
-			idx := rf.commitIndex
 			for i := rf.logToRaftIndex(len(rf.log) - 1); i > rf.commitIndex; i-- {
 				count := 0
 				for p := range rf.peers {
@@ -211,16 +213,14 @@ func (rf *Raft) checkCommitIndex() {
 					}
 				}
 				if count > len(rf.peers)/2 {
-					idx = i
-					break
+					logIdx := rf.raftToLogIndex(i)
+					valid := logIdx >= 0 && logIdx < len(rf.log)
+					if valid && rf.log[logIdx].Term == rf.currentTerm {
+						fmt.Printf("- leader (me %v) increase commit index to %v in term %v time %v\n", rf.me, i, rf.currentTerm, Timestamp())
+						rf.commitIndex = i
+						break
+					}
 				}
-			}
-
-			valid := rf.raftToLogIndex(idx) >= 0 && rf.raftToLogIndex(idx) < len(rf.log)
-
-			if valid && idx >= RaftStartIndex && rf.log[rf.raftToLogIndex(idx)].Term == rf.currentTerm && idx > rf.commitIndex {
-				fmt.Printf("- leader (me %v) increase commit index to %v in term %v time %v\n", rf.me, idx, rf.currentTerm, Timestamp())
-				rf.commitIndex = idx
 			}
 		}
 		rf.mu.Unlock()

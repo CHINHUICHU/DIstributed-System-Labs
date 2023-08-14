@@ -22,13 +22,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := rf.Role() == Leader
-	// fmt.Printf("someone comes here (before the first return) index %v, command %v, isLeader %v\n", index, command, isLeader)
 	if !isLeader {
 		return index, term, isLeader
 	}
 	rf.mu.Lock()
 	ready := rf.matchIndex != nil && rf.nextIndex != nil
-	// fmt.Printf("someone comes here (before) index %v, command %v, isLeader %v\n", index, command, isLeader)
 	// Your code here (2B).
 	if !rf.killed() && ready {
 		// append entry to local log
@@ -57,21 +55,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 
 		fmt.Printf("Leader %v check log, index %v, command %v\n", rf.me, index, command)
-		// fmt.Printf("------- leader %v check log in term %v -------\n", rf.me, rf.currentTerm)
-		// for i, e := range rf.log {
-		// 	// if len(rf.log) > 0 {
-		// 	// 	e := rf.log[len(rf.log)-1]
-		// 	fmt.Printf("me %v index %v, command %v, term %v\n", rf.me, i, e.Command, e.Term)
-		// 	// }
-		// }
-		// fmt.Printf("------- leader %v check log in term %v finished-------\n", rf.me, rf.currentTerm)
-
 		return index, term, isLeader
 	} else {
-		// fmt.Printf("someone comes here (else) index %v, command %v, isLeader %v\n", index, command, isLeader)
 		rf.mu.Unlock()
 	}
-	// fmt.Printf("someone comes here index %v, command %v, isLeader %v\n", index, command, isLeader)
 	return index, term, isLeader
 }
 

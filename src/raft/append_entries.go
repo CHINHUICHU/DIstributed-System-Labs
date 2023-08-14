@@ -30,7 +30,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}()
 
 	if args.Term < rf.currentTerm {
-		// fmt.Printf("- leader's term outdated leader %v, leader's term %v, me: %v, my term: %v time: %v\n", args.LeaderId, args.Term, rf.me, rf.currentTerm, Timestamp())
 		reply.Term = rf.currentTerm
 		return
 	} else if args.Term > rf.currentTerm {
@@ -38,9 +37,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.role = Follower
 		rf.matchIndex = nil
 		rf.nextIndex = nil
-		// fmt.Printf("- role changed **Term changed** leader term higher than me: %v, leader's term: %v time: %v\n", rf.me, args.Term, Timestamp())
 	} else if rf.role == Candidate {
-		// fmt.Printf("- role changed I (me %v) am candidate in term %v, received hb, convert to follower, time %v\n", rf.me, rf.currentTerm, Timestamp())
 		rf.role = Follower
 		rf.matchIndex = nil
 		rf.nextIndex = nil
@@ -48,7 +45,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 	rf.lastContact = time.Now()
-	// fmt.Printf("%v received Append Entries RPC from leader %v in term %v, ***reset election timer*** time %v\n", rf.me, args.LeaderId, reply.Term, Timestamp())
 
 	if rf.raftToLogIndex(args.PrevLogIndex) < 0 {
 		fmt.Printf("this is old append entries RPC, ignore\n")
@@ -90,11 +86,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		logIdx := rf.raftToLogIndex(args.PrevLogIndex + i + 1)
 		if logIdx >= 0 && logIdx < len(rf.log) {
 			if e := rf.log[logIdx]; e.Term != args.Entries[i].Term || e.Command != args.Entries[i].Command {
-				// fmt.Print("------Entry conflict, need to truncate------\n")
-				// fmt.Printf("LEADER: %v, command %v, term %v, index %v\n", args.LeaderId, args.Entries[i].Command, args.Entries[i].Term, i)
-				// fmt.Printf("SERVER: %v, command %v, term %v, index %v\n", rf.me, e.Command, e.Term, args.PrevLogIndex+i+1)
-				// fmt.Print("------Entry conflict, need to truncate------\n")
-				// update seen when truncate log
 				for i := logIdx; i < len(rf.log); i++ {
 					delete(rf.seen, rf.log[i].Command)
 				}
@@ -127,14 +118,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 	e := rf.log[len(rf.log)-1]
 	// 	fmt.Printf("me %v index %v, command %v, term %v\n", rf.me, len(rf.log)-1, e.Command, e.Term)
 	// }
-	if args.Entries != nil {
-		fmt.Printf("-------follower check log------\n")
+	// if args.Entries != nil {
+	// 	fmt.Printf("-------follower check log------\n")
 
-		for i, e := range rf.log {
-			fmt.Printf("me %v, index %v, command %v, term %v, time %v\n", rf.me, rf.logToRaftIndex(i), e.Command, e.Term, Timestamp())
-		}
-		fmt.Printf("-------follower check log------\n")
-	}
+	// 	for i, e := range rf.log {
+	// 		fmt.Printf("me %v, index %v, command %v, term %v, time %v\n", rf.me, rf.logToRaftIndex(i), e.Command, e.Term, Timestamp())
+	// 	}
+	// 	fmt.Printf("-------follower check log------\n")
+	// }
 
 	// AE PRC step 5: check commit index
 	if ci := rf.commitIndex; args.LeaderCommit > ci {
@@ -144,7 +135,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			ci = lastIdx
 		}
 		rf.commitIndex = ci
-		fmt.Printf("server %v update commit index to min(leader ci: %v, last idx of new entry: %v) in term %v time %v\n", rf.me, args.LeaderCommit, lastIdx, rf.currentTerm, Timestamp())
 	}
 	reply.Success = true
 }

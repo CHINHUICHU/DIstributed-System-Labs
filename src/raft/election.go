@@ -2,14 +2,13 @@ package raft
 
 import (
 	"fmt"
-	"math/rand"
 	"sync/atomic"
 	"time"
 )
 
-var (
-	ElectionTimeout = 300 + (rand.Int63() % 200)
-)
+// var (
+// 	ElectionTimeout = 300 + (rand.Int63() % 200)
+// )
 
 const (
 	WaitForVotingFinishedBreak = 50 * time.Millisecond
@@ -142,6 +141,23 @@ func (rf *Raft) startElection() {
 					go func(args *RequestVoteArgs, replay *RequestVoteReply, replied chan bool) {
 						ok := rf.sendRequestVote(i, args, reply)
 						replied <- ok
+
+						if <-replied {
+							rf.mu.Lock()
+							isOutdated := rf.currentTerm != args.Term || rf.role != Candidate
+							if !isOutdated {
+								if reply.Term > rf.currentTerm {
+									rf.role = Follower
+									rf.currentTerm = reply.Term
+									rf.matchIndex = nil
+									rf.nextIndex = nil
+									rf.persist()
+								} else if reply.VoteGranted {
+									atomic.AddInt32(&rf.votes, 1)
+								}
+							}
+							rf.mu.Unlock()
+						}
 					}(args, reply, replied)
 
 					go func(replied chan bool) {
@@ -153,23 +169,6 @@ func (rf *Raft) startElection() {
 							time.Sleep(CheckInterval)
 						}
 					}(replied)
-
-					if <-replied {
-						rf.mu.Lock()
-						isOutdated := rf.currentTerm != args.Term || rf.role != Candidate
-						if !isOutdated {
-							if reply.Term > rf.currentTerm {
-								rf.role = Follower
-								rf.currentTerm = reply.Term
-								rf.matchIndex = nil
-								rf.nextIndex = nil
-								rf.persist()
-							} else if reply.VoteGranted {
-								atomic.AddInt32(&rf.votes, 1)
-							}
-						}
-						rf.mu.Unlock()
-					}
 				}(i)
 			}
 		}
@@ -195,8 +194,6 @@ func (rf *Raft) startElection() {
 				time.Sleep(DelayToSendHeartbeat)
 				go rf.reachAgreement()
 				return
-			} else {
-				// fmt.Printf("server %v is not elected as leader in term %v\n", rf.me, rf.currentTerm)
 			}
 			time.Sleep(CheckInterval)
 		}
