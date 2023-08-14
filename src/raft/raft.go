@@ -39,13 +39,14 @@ import (
 // other uses.
 const (
 	CheckInterval  = 10 * time.Millisecond
-	RpcTimeout     = 150 * time.Millisecond
+	RpcTimeout     = 80 * time.Millisecond
 	AppendInterval = 10 * time.Millisecond
+	RaftStartIndex = 1
 )
 
-var (
-	Ticker = 50 + rand.Int63()%300
-)
+// var (
+// 	Ticker = 50 + rand.Int63()%300
+// )
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -86,32 +87,35 @@ type Raft struct {
 	matchIndex []int
 	seen       map[interface{}]int
 
-	highestSnapshot int
+	// all the log "before" this index has been snapshoted
+	// the first index of rf.log will be snapshotBefore
+	// snapshotBefore    int
+	latestSnapshot    []byte
+	lastIncludedTerm  int
+	lastIncludedIndex int
 }
 
 type Entry struct {
 	Term    int
 	Command interface{}
-	// Index   int
 }
 
 func (rf *Raft) ticker() {
 	for !rf.killed() {
-
-		time.Sleep(time.Duration(Ticker) * time.Millisecond)
+		ms := 50 + rand.Int63()%300
+		time.Sleep(time.Duration(ms) * time.Millisecond)
 		timeout := time.Duration(ElectionTimeout) * time.Millisecond
-
 		for {
 			rf.mu.Lock()
 			elapsed := time.Since(rf.lastContact)
 			role := rf.role
-			rf.mu.Unlock()
 			if elapsed > timeout && role != Leader {
-				rf.mu.Lock()
 				rf.role = Candidate
 				rf.mu.Unlock()
 				go rf.startElection()
 				break
+			} else {
+				rf.mu.Unlock()
 			}
 			time.Sleep(CheckInterval)
 		}
@@ -131,26 +135,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 
 	rf := &Raft{
-		peers:           peers,
-		persister:       persister,
-		me:              me,
-		votedFor:        -1,
-		lastContact:     time.Now(),
-		applych:         applyCh,
-		log:             make([]Entry, 0),
-		seen:            make(map[interface{}]int),
-		lastApplied:     -1,
-		commitIndex:     -1,
-		highestSnapshot: -1,
+		peers:       peers,
+		persister:   persister,
+		me:          me,
+		votedFor:    -1,
+		lastContact: time.Now(),
+		applych:     applyCh,
+		log:         make([]Entry, 0),
+		seen:        make(map[interface{}]int),
 	}
+
+	rf.log = append(rf.log, Entry{})
 
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	rf.mu.Lock()
-	fmt.Printf("I am back, me %v, term %v\n", rf.me, rf.currentTerm)
-	rf.mu.Unlock()
+	rf.latestSnapshot = persister.ReadSnapshot()
+	rf.lastApplied = rf.lastIncludedIndex
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -160,8 +162,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// only leader run the routines
 
 	go rf.checkCommitIndex()
-
-	// go rf.updateSeen()
 
 	return rf
 }
@@ -173,12 +173,16 @@ func (rf *Raft) applier() {
 		for {
 			if rf.commitIndex > rf.lastApplied {
 				rf.lastApplied++
-				applyIndex := rf.lastApplied + 1
-				e := rf.log[rf.lastApplied]
+				logIdx := rf.raftToLogIndex(rf.lastApplied)
+				valid := logIdx >= 0 && logIdx < len(rf.log) && rf.log[logIdx].Command != nil
+				if !valid {
+					break
+				}
+				e := rf.log[logIdx]
 				am := ApplyMsg{
 					CommandValid: true,
 					Command:      e.Command,
-					CommandIndex: applyIndex,
+					CommandIndex: rf.lastApplied,
 				}
 				fmt.Printf("server %v apply msg, command %v index %v term %v time %v\n", rf.me, am.Command, am.CommandIndex, rf.currentTerm, Timestamp())
 				applyEntries = append(applyEntries, am)
@@ -199,26 +203,23 @@ func (rf *Raft) checkCommitIndex() {
 		rf.mu.Lock()
 		if rf.role == Leader && rf.matchIndex != nil && len(rf.log) > 0 {
 			idx := rf.commitIndex
-			// match := make([]int, 0)
-			for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
+			for i := rf.logToRaftIndex(len(rf.log) - 1); i > rf.commitIndex; i-- {
 				count := 0
-				// checker := make([]int, 0)
 				for p := range rf.peers {
 					if rf.matchIndex[p] >= i {
 						count++
-						// checker = append(checker, p)
 					}
 				}
 				if count > len(rf.peers)/2 {
-					// match = append(match, checker...)
 					idx = i
 					break
 				}
 			}
 
-			if idx >= 0 && rf.log[idx].Term == rf.currentTerm && idx > rf.commitIndex {
+			valid := rf.raftToLogIndex(idx) >= 0 && rf.raftToLogIndex(idx) < len(rf.log)
+
+			if valid && idx >= RaftStartIndex && rf.log[rf.raftToLogIndex(idx)].Term == rf.currentTerm && idx > rf.commitIndex {
 				fmt.Printf("- leader (me %v) increase commit index to %v in term %v time %v\n", rf.me, idx, rf.currentTerm, Timestamp())
-				// fmt.Printf("Log matched with me %v, matched server %v\n", rf.me, match)
 				rf.commitIndex = idx
 			}
 		}
@@ -226,23 +227,3 @@ func (rf *Raft) checkCommitIndex() {
 		time.Sleep(CheckInterval)
 	}
 }
-
-// func (rf *Raft) updateSeen() {
-// 	for !rf.killed() {
-// 		rf.mu.Lock()
-// 		for i, e := range rf.log {
-// 			if idx, ok := rf.seen[e.Command]; !ok || idx != i {
-// 				rf.seen[e.Command] = i
-// 			}
-// 		}
-
-// 		for k, v := range rf.seen {
-// 			if v < 0 || v >= len(rf.log) || rf.log[v].Command != k {
-// 				delete(rf.seen, k)
-// 			}
-// 		}
-
-// 		rf.mu.Unlock()
-// 		time.Sleep(CheckInterval)
-// 	}
-// }

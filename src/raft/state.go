@@ -59,8 +59,10 @@ func (rf *Raft) CurrentTerm() int {
 	return rf.currentTerm
 }
 
-func (rf *Raft) isLeaderReady() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.nextIndex != nil && rf.matchIndex != nil && rf.role == Leader
+func (rf *Raft) raftToLogIndex(raftIndex int) int {
+	return raftIndex - rf.lastIncludedIndex
+}
+
+func (rf *Raft) logToRaftIndex(index int) int {
+	return index + rf.lastIncludedIndex
 }

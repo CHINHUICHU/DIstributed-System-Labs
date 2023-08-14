@@ -2,6 +2,7 @@ package raft
 
 import (
 	"bytes"
+	"fmt"
 
 	"6.5840/labgob"
 )
@@ -20,8 +21,10 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	raftState := w.Bytes()
-	rf.persister.Save(raftState, nil)
+	rf.persister.Save(raftState, rf.latestSnapshot)
 }
 
 // restore previously persisted state.
@@ -36,13 +39,24 @@ func (rf *Raft) readPersist(data []byte) {
 	var term int
 	var votedFor int
 	var log []Entry
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 	if d.Decode(&term) == nil &&
 		d.Decode(&votedFor) == nil &&
-		d.Decode(&log) == nil {
+		d.Decode(&log) == nil &&
+		d.Decode(&lastIncludedIndex) == nil &&
+		d.Decode(&lastIncludedTerm) == nil {
 		rf.mu.Lock()
 		rf.currentTerm = term
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
+		fmt.Printf("server %v recover...., lastIncludedIndex %v\n", rf.me, rf.lastIncludedIndex)
+		fmt.Printf("server %v check log after recovery \n", rf.me)
+		for i, e := range rf.log {
+			fmt.Printf("server %v index %v command %v\n", rf.me, i+rf.lastIncludedIndex, e.Command)
+		}
 		rf.mu.Unlock()
 	}
 }
