@@ -44,23 +44,39 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	reply.Term = rf.currentTerm
+
+	lastIdx := args.PrevLogIndex + len(args.Entries)
+
+	if lastIdx < rf.lastIncludedIndex {
+		fmt.Printf("leader's %v prevIdx + log len < follower %v\n", args.LeaderId, rf.me)
+		return
+	}
+
 	rf.lastContact = time.Now()
 
-	if rf.raftToLogIndex(args.PrevLogIndex) < 0 {
-		fmt.Printf("this is old append entries RPC, ignore\n")
-		return
+	if lastIdx == rf.lastIncludedIndex {
+		fmt.Printf("leader's %v prevIdx + log len = follower %v\n", args.LeaderId, rf.me)
+		args.PrevLogIndex = lastIdx
+		args.PrevLogTerm = args.Entries[len(args.Entries)-1].Term
+		args.Entries = args.Entries[len(args.Entries)-1:]
+	} else if args.PrevLogIndex < rf.lastIncludedIndex && lastIdx > rf.lastIncludedIndex {
+		fmt.Printf("leader's %v prevIdx + log len > follower %v\n", args.LeaderId, rf.me)
+		newPrev := rf.lastIncludedIndex - args.PrevLogIndex - 1
+		args.PrevLogIndex = rf.lastIncludedIndex
+		args.PrevLogTerm = args.Entries[newPrev].Term
+		args.Entries = args.Entries[newPrev+1:]
 	}
 
 	// process RPC
 	// AE RPC step 2: check if entry match at prevLogIndex and prevLogTerm
 	if lastRaftIndex := rf.logToRaftIndex(len(rf.log) - 1); args.PrevLogIndex > lastRaftIndex {
-		fmt.Printf("leader (me %v)'s preLogIndex %v out of my (me %v) log len (%v) range time (append log and immediately send hb)%v\n", args.LeaderId, args.PrevLogIndex, rf.me, lastRaftIndex+1, Timestamp())
+		// fmt.Printf("leader (me %v)'s preLogIndex %v out of my (me %v) log len (%v) range time (append log and immediately send hb)%v\n", args.LeaderId, args.PrevLogIndex, rf.me, lastRaftIndex+1, Timestamp())
 		reply.ConflictIndex = lastRaftIndex + 1
 		return
 	} else if args.PrevLogIndex > rf.logToRaftIndex(0) {
 		logIndex := rf.raftToLogIndex(args.PrevLogIndex)
 		if e := rf.log[logIndex]; e.Term != args.PrevLogTerm {
-			fmt.Printf("log conflict: leader %v me %v log index %v leader term %v my term %v time %v \n", args.LeaderId, rf.me, args.PrevLogIndex, e.Term, args.PrevLogTerm, Timestamp())
+			// fmt.Printf("log conflict: leader %v me %v log index %v leader term %v my term %v time %v \n", args.LeaderId, rf.me, args.PrevLogIndex, e.Term, args.PrevLogTerm, Timestamp())
 			reply.ConflictTerm = e.Term
 			for i, entry := range rf.log {
 				if entry.Term == e.Term {
@@ -73,13 +89,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	newEntries := args.Entries
 	match := 0
-
-	// fmt.Printf("leader %v, new entries len %v, leader prev log index %v\n", args.LeaderId, len(newEntries), args.PrevLogIndex)
-	// fmt.Printf("-------leader's log to append------\n")
-	// for i, e := range newEntries {
-	// 	fmt.Printf("leader %v, index %v, command %v, term %v, time %v\n", args.LeaderId, i+args.PrevLogIndex+1, e.Command, e.Term, Timestamp())
-	// }
-	// fmt.Printf("-------leader's log to append------\n")
 
 	// AE RPC step 3: truncate follower's if conflicting
 	for i := 0; i < len(args.Entries); i++ {
@@ -113,11 +122,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	// AE PRC step 4: append log
-	// if len(rf.log) > 0 {
-	// 	e := rf.log[len(rf.log)-1]
-	// 	fmt.Printf("me %v index %v, command %v, term %v\n", rf.me, len(rf.log)-1, e.Command, e.Term)
-	// }
 	// if args.Entries != nil {
 	// 	fmt.Printf("-------follower check log------\n")
 
@@ -135,6 +139,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			ci = lastIdx
 		}
 		rf.commitIndex = ci
+		// fmt.Printf("server %v update commit index %v\n", rf.me, rf.commitIndex)
 	}
 	reply.Success = true
 }

@@ -39,14 +39,11 @@ import (
 // other uses.
 const (
 	CheckInterval  = 10 * time.Millisecond
-	RpcTimeout     = 80 * time.Millisecond
+	RpcTimeout     = 100 * time.Millisecond
 	AppendInterval = 10 * time.Millisecond
 	RaftStartIndex = 1
+	RpcInterval    = 20 * time.Millisecond
 )
-
-// var (
-// 	Ticker = 50 + rand.Int63()%300
-// )
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -155,6 +152,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.latestSnapshot = persister.ReadSnapshot()
 	rf.lastApplied = rf.lastIncludedIndex
 
+	for i, e := range rf.log {
+		rf.seen[e.Command] = rf.logToRaftIndex(i)
+	}
+
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
@@ -171,25 +172,21 @@ func (rf *Raft) applier() {
 	for !rf.killed() {
 		applyEntries := make([]ApplyMsg, 0)
 		rf.mu.Lock()
-		for {
-			if rf.commitIndex > rf.lastApplied {
-				rf.lastApplied++
-				logIdx := rf.raftToLogIndex(rf.lastApplied)
-				valid := logIdx >= 0 && logIdx < len(rf.log) && rf.log[logIdx].Command != nil
-				if !valid {
-					break
-				}
-				e := rf.log[logIdx]
-				am := ApplyMsg{
-					CommandValid: true,
-					Command:      e.Command,
-					CommandIndex: rf.lastApplied,
-				}
-				fmt.Printf("server %v apply msg, command %v index %v term %v time %v\n", rf.me, am.Command, am.CommandIndex, rf.currentTerm, Timestamp())
-				applyEntries = append(applyEntries, am)
-			} else {
+		for rf.commitIndex > rf.lastApplied {
+			rf.lastApplied++
+			logIdx := rf.raftToLogIndex(rf.lastApplied)
+			valid := logIdx >= 0 && logIdx < len(rf.log) && rf.log[logIdx].Command != nil
+			if !valid {
 				break
 			}
+			e := rf.log[logIdx]
+			am := ApplyMsg{
+				CommandValid: true,
+				Command:      e.Command,
+				CommandIndex: rf.lastApplied,
+			}
+			fmt.Printf("server %v apply msg, command %v index %v term %v time %v\n", rf.me, am.Command, am.CommandIndex, rf.currentTerm, Timestamp())
+			applyEntries = append(applyEntries, am)
 		}
 		rf.mu.Unlock()
 		go func(applyEntries []ApplyMsg) {
@@ -202,9 +199,9 @@ func (rf *Raft) applier() {
 }
 
 func (rf *Raft) checkCommitIndex() {
-	for !rf.killed() {
+	for {
 		rf.mu.Lock()
-		if rf.role == Leader && rf.matchIndex != nil && len(rf.log) > 0 {
+		if !rf.killed() && rf.role == Leader && rf.matchIndex != nil && len(rf.log) > 0 {
 			for i := rf.logToRaftIndex(len(rf.log) - 1); i > rf.commitIndex; i-- {
 				count := 0
 				for p := range rf.peers {
@@ -216,9 +213,8 @@ func (rf *Raft) checkCommitIndex() {
 					logIdx := rf.raftToLogIndex(i)
 					valid := logIdx >= 0 && logIdx < len(rf.log)
 					if valid && rf.log[logIdx].Term == rf.currentTerm {
-						fmt.Printf("- leader (me %v) increase commit index to %v in term %v time %v\n", rf.me, i, rf.currentTerm, Timestamp())
+						// fmt.Printf("- leader (me %v) increase commit index to %v in term %v time %v\n", rf.me, i, rf.currentTerm, Timestamp())
 						rf.commitIndex = i
-						break
 					}
 				}
 			}

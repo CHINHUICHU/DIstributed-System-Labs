@@ -19,58 +19,54 @@ import (
 // the leader.
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	index := -1
 	term := -1
-	isLeader := rf.Role() == Leader
+	isLeader := rf.role == Leader && rf.nextIndex != nil && rf.matchIndex != nil && !rf.killed()
 	if !isLeader {
 		return index, term, isLeader
 	}
-	rf.mu.Lock()
-	ready := rf.matchIndex != nil && rf.nextIndex != nil
-	// Your code here (2B).
-	if !rf.killed() && ready {
-		// append entry to local log
-		defer func() {
-			rf.persist()
-			rf.mu.Unlock()
-		}()
 
-		term = rf.currentTerm
-		entry := Entry{
-			Term:    term,
-			Command: command,
-		}
-		var index int
+	defer rf.persist()
 
-		if raftIndex, ok := rf.seen[command]; ok {
-			logIndex := rf.raftToLogIndex(raftIndex)
-			rf.log[logIndex] = entry
-			index = raftIndex
-		} else {
-			rf.log = append(rf.log, entry)
-			index = rf.logToRaftIndex(len(rf.log) - 1)
-			rf.nextIndex[rf.me] = index + 1
-			rf.matchIndex[rf.me] = index
-			rf.seen[entry.Command] = index
-		}
-
-		fmt.Printf("Leader %v check log, index %v, command %v\n", rf.me, index, command)
-		return index, term, isLeader
-	} else {
-		rf.mu.Unlock()
+	term = rf.currentTerm
+	entry := Entry{
+		Term:    term,
+		Command: command,
 	}
+
+	if raftIndex, ok := rf.seen[command]; ok {
+		logIndex := rf.raftToLogIndex(raftIndex)
+		rf.log[logIndex] = entry
+		index = raftIndex
+	} else {
+		rf.log = append(rf.log, entry)
+		index = rf.logToRaftIndex(len(rf.log) - 1)
+		rf.nextIndex[rf.me] = index + 1
+		rf.matchIndex[rf.me] = index
+		rf.seen[entry.Command] = index
+	}
+
+	// fmt.Printf("Leader %v check log, index %v, command %v, term %v\n", rf.me, index, command, rf.currentTerm)
 	return index, term, isLeader
 }
 
 func (rf *Raft) reachAgreement() {
 	for !rf.killed() {
-		start := rf.CurrentTerm()
+		rf.mu.Lock()
+		start := rf.currentTerm
+		rf.mu.Unlock()
 		for i := range rf.peers {
 			rf.mu.Lock()
 			if i != rf.me && rf.nextIndex != nil && rf.matchIndex != nil && rf.role == Leader && start == rf.currentTerm {
 				rf.mu.Unlock()
-				go rf.appendLogRoutine(i)
-				time.Sleep(AppendInterval)
+				go rf.appendLogRoutine(i, start)
+				time.Sleep(RpcInterval)
+			} else if rf.role != Leader || rf.currentTerm != start {
+				rf.mu.Unlock()
+				return
 			} else {
 				rf.mu.Unlock()
 			}
@@ -78,12 +74,11 @@ func (rf *Raft) reachAgreement() {
 	}
 }
 
-func (rf *Raft) appendLogRoutine(i int) {
+func (rf *Raft) appendLogRoutine(i int, start int) {
 	// this routine will at least run once for heartbeat
-	shouldContinue := true
-	for shouldContinue {
+	for {
 		rf.mu.Lock()
-		isValid := rf.role == Leader && rf.nextIndex != nil && rf.matchIndex != nil
+		isValid := rf.role == Leader && rf.nextIndex != nil && rf.matchIndex != nil && !rf.killed() && rf.currentTerm == start
 		if isValid && rf.raftToLogIndex(rf.nextIndex[i]) >= 0 {
 			if next := rf.logToRaftIndex(len(rf.log)); rf.nextIndex[i] > next {
 				rf.nextIndex[i] = next
@@ -103,61 +98,58 @@ func (rf *Raft) appendLogRoutine(i int) {
 				LeaderCommit: rf.commitIndex,
 			}
 			reply := &AppendEntriesReply{}
-			replied := make(chan bool, 1)
-			start := time.Now()
+			replied := make(chan struct{}, 1)
 
-			go func(args *AppendEntriesArgs, reply *AppendEntriesReply, replied chan bool) {
-				replied <- rf.sendAppendEntries(i, args, reply)
+			go func(args *AppendEntriesArgs, reply *AppendEntriesReply, replied chan struct{}) {
+				rf.sendAppendEntries(i, args, reply)
+				replied <- struct{}{}
 			}(args, reply, replied)
+			rf.mu.Unlock()
 
-			go func(replied chan bool) {
-				for {
-					if time.Since(start) > RpcTimeout {
-						replied <- false
-						return
+		loop:
+			for {
+				select {
+				case <-replied:
+					// fmt.Printf("append time %v\n", time.Since(start).Abs().Milliseconds())
+					rf.mu.Lock()
+					isOutdated := rf.currentTerm != args.Term ||
+						rf.role != Leader ||
+						rf.nextIndex == nil ||
+						rf.matchIndex == nil ||
+						rf.nextIndex[i] != args.PrevLogIndex+1
+					if !isOutdated {
+						if reply.Term > rf.currentTerm {
+							rf.role = Follower
+							rf.nextIndex = nil
+							rf.matchIndex = nil
+							rf.currentTerm = reply.Term
+							rf.persist()
+						} else if reply.Success {
+							rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
+							rf.nextIndex[i] = args.PrevLogIndex + len(args.Entries) + 1
+							if rf.logToRaftIndex(len(rf.log)-1) < rf.nextIndex[i] || len(args.Entries) == 0 {
+								rf.mu.Unlock()
+								return
+							}
+						} else {
+							index := -1
+							for i, e := range rf.log {
+								if e.Term == reply.ConflictTerm {
+									index = rf.logToRaftIndex(i) + 1
+								}
+							}
+							if index == -1 {
+								index = reply.ConflictIndex
+							}
+							rf.nextIndex[i] = index
+						}
 					}
+					rf.mu.Unlock()
+				case <-time.After(RpcTimeout):
+					break loop
+				default:
 					time.Sleep(CheckInterval)
 				}
-			}(replied)
-
-			rf.mu.Unlock()
-			if <-replied {
-				rf.mu.Lock()
-				isOutdated := rf.currentTerm != args.Term ||
-					rf.role != Leader ||
-					rf.nextIndex == nil ||
-					rf.matchIndex == nil ||
-					rf.nextIndex[i] != args.PrevLogIndex+1
-				if !isOutdated {
-					if reply.Term > rf.currentTerm {
-						rf.role = Follower
-						rf.nextIndex = nil
-						rf.matchIndex = nil
-						rf.currentTerm = reply.Term
-						rf.persist()
-					} else if reply.Success {
-						mi := args.PrevLogIndex + len(args.Entries)
-						fmt.Printf("append success, leader %v update server %v match index to %v time %v\n", rf.me, i, mi, Timestamp())
-						rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
-						rf.nextIndex[i] = args.PrevLogIndex + len(args.Entries) + 1
-						if rf.logToRaftIndex(len(rf.log)-1) < rf.nextIndex[i] || len(args.Entries) == 0 {
-							shouldContinue = false
-						}
-					} else {
-						index := -1
-						for i, e := range rf.log {
-							if e.Term == reply.ConflictTerm {
-								index = rf.logToRaftIndex(i) + 1
-							}
-						}
-						if index == -1 {
-							index = reply.ConflictIndex
-						}
-						rf.nextIndex[i] = index
-						// fmt.Printf("append failed, leader %v set server %v nextIndex %v\n", rf.me, i, index)
-					}
-				}
-				rf.mu.Unlock()
 			}
 		} else if isValid && rf.raftToLogIndex(rf.nextIndex[i]) < 0 {
 			// should install snapshot
@@ -169,49 +161,46 @@ func (rf *Raft) appendLogRoutine(i int) {
 				Data:              rf.latestSnapshot,
 			}
 			reply := &InstallSnapshotReply{}
-			replied := make(chan bool, 1)
-			start := time.Now()
-			// fmt.Printf("reason why we need to install snapshot nextIndex[i] %v lastIncludeIndex %v\n", rf.nextIndex[i], rf.lastIncludedIndex)
+			replied := make(chan struct{}, 1)
 			rf.mu.Unlock()
-			// fmt.Printf("leader %v send install snapshot rpc to server %v, args: index %v term %v\n", rf.me, i, args.LastIncludedIndex, args.LastIncludedTerm)
-			go func(args *InstallSnapshotArgs, reply *InstallSnapshotReply, ch chan bool) {
-				ok := rf.sendInstallSnapshot(i, args, reply)
-				replied <- ok
+			go func(args *InstallSnapshotArgs, reply *InstallSnapshotReply, ch chan struct{}) {
+				rf.sendInstallSnapshot(i, args, reply)
+				replied <- struct{}{}
 			}(args, reply, replied)
-			go func(ch chan bool) {
-				for {
-					if time.Since(start) > RpcTimeout {
-						replied <- false
-						return
-					}
-					time.Sleep(CheckInterval)
-				}
-			}(replied)
-			if <-replied {
-				rf.mu.Lock()
-				isOutdated := rf.currentTerm != args.Term || rf.role != Leader || rf.lastIncludedIndex != args.LastIncludedIndex
-				if !isOutdated {
-					if reply.Term > rf.currentTerm {
-						rf.role = Follower
-						rf.nextIndex = nil
-						rf.matchIndex = nil
-						rf.currentTerm = reply.Term
-						rf.persist()
-					} else {
-						if rf.lastIncludedIndex > rf.matchIndex[i] {
-							rf.nextIndex[i] = rf.lastIncludedIndex + 1
-							rf.matchIndex[i] = rf.lastIncludedIndex
-							fmt.Printf("leader %v install snapshot success, set server %v match index = %v\n", rf.me, i, rf.lastIncludedIndex)
+
+		loop2:
+			for {
+				select {
+				case <-replied:
+					rf.mu.Lock()
+					isOutdated := rf.currentTerm != args.Term || rf.role != Leader || rf.lastIncludedIndex != args.LastIncludedIndex
+					if !isOutdated {
+						if reply.Term > rf.currentTerm {
+							rf.role = Follower
+							rf.nextIndex = nil
+							rf.matchIndex = nil
+							rf.currentTerm = reply.Term
+							rf.persist()
+						} else {
+							if rf.lastIncludedIndex > rf.matchIndex[i] {
+								rf.nextIndex[i] = rf.lastIncludedIndex + 1
+								rf.matchIndex[i] = rf.lastIncludedIndex
+								fmt.Printf("leader %v install snapshot success, set server %v match index = %v\n", rf.me, i, rf.lastIncludedIndex)
+							}
 						}
 					}
+					rf.mu.Unlock()
+				case <-time.After(RpcTimeout * 2):
+					break loop2
+				default:
+					time.Sleep(CheckInterval)
 				}
-				rf.mu.Unlock()
 			}
 			return
 		} else {
 			rf.mu.Unlock()
 			return
 		}
-		time.Sleep(AppendInterval)
+		time.Sleep(RpcInterval)
 	}
 }
