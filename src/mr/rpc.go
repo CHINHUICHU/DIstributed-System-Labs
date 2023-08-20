@@ -17,20 +17,17 @@ import (
 //
 
 type RpcArgs struct {
-	Task         string
-	MapNumber    int
-	ReduceNumber int
+	WorkerID   int
+	Task       TaskType
+	TaskNumber int
 }
 
 // need default value
 type RpcReply struct {
-	Task         string
-	FileName     string
-	MapNumber    int
-	NMap         int
-	NReduce      int
-	ReduceNumber int
-	StartReduce  bool
+	Task       TaskType
+	TaskNumber int
+	FileName   string
+	Total      map[TaskType]int
 }
 
 // Add your RPC definitions here.

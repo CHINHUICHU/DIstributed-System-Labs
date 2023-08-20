@@ -5,3 +5,4 @@ api.key
 .DS_Store
 /src/main/mr_*_*
 /src/main/mr-tmp
+out*
