@@ -25,6 +25,7 @@ const (
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	fmt.Printf("server %v crashed\n", rf.me)
 }
 
 func (rf *Raft) killed() bool {

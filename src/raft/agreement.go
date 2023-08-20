@@ -49,15 +49,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.seen[entry.Command] = index
 	}
 
-	// fmt.Printf("Leader %v check log, index %v, command %v, term %v\n", rf.me, index, command, rf.currentTerm)
+	fmt.Printf("Leader %v check log, index %v, command %v, term %v\n", rf.me, index, command, rf.currentTerm)
 	return index, term, isLeader
 }
 
 func (rf *Raft) reachAgreement() {
+	rf.mu.Lock()
+	start := rf.currentTerm
+	rf.mu.Unlock()
+
 	for !rf.killed() {
-		rf.mu.Lock()
-		start := rf.currentTerm
-		rf.mu.Unlock()
 		for i := range rf.peers {
 			rf.mu.Lock()
 			if i != rf.me && rf.nextIndex != nil && rf.matchIndex != nil && rf.role == Leader && start == rf.currentTerm {
@@ -76,9 +77,10 @@ func (rf *Raft) reachAgreement() {
 
 func (rf *Raft) appendLogRoutine(i int, start int) {
 	// this routine will at least run once for heartbeat
+	// fmt.Printf("leader %v send append RPC to server %v\n", rf.me, i)
 	for {
 		rf.mu.Lock()
-		isValid := rf.role == Leader && rf.nextIndex != nil && rf.matchIndex != nil && !rf.killed() && rf.currentTerm == start
+		isValid := rf.role == Leader && rf.nextIndex != nil && rf.matchIndex != nil && !rf.killed()
 		if isValid && rf.raftToLogIndex(rf.nextIndex[i]) >= 0 {
 			if next := rf.logToRaftIndex(len(rf.log)); rf.nextIndex[i] > next {
 				rf.nextIndex[i] = next
@@ -97,6 +99,7 @@ func (rf *Raft) appendLogRoutine(i int, start int) {
 				Entries:      entries,
 				LeaderCommit: rf.commitIndex,
 			}
+			// fmt.Printf("append args %+v to server %v\n", args, i)
 			reply := &AppendEntriesReply{}
 			replied := make(chan struct{}, 1)
 
@@ -113,24 +116,28 @@ func (rf *Raft) appendLogRoutine(i int, start int) {
 					// fmt.Printf("append time %v\n", time.Since(start).Abs().Milliseconds())
 					rf.mu.Lock()
 					isOutdated := rf.currentTerm != args.Term ||
-						rf.role != Leader ||
-						rf.nextIndex == nil ||
-						rf.matchIndex == nil ||
 						rf.nextIndex[i] != args.PrevLogIndex+1
-					if !isOutdated {
+					isInvalid := rf.role != Leader ||
+						rf.nextIndex == nil ||
+						rf.matchIndex == nil
+					if !isOutdated && !isInvalid {
 						if reply.Term > rf.currentTerm {
 							rf.role = Follower
 							rf.nextIndex = nil
 							rf.matchIndex = nil
 							rf.currentTerm = reply.Term
 							rf.persist()
+							rf.mu.Unlock()
+							return
 						} else if reply.Success {
-							rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
-							rf.nextIndex[i] = args.PrevLogIndex + len(args.Entries) + 1
-							if rf.logToRaftIndex(len(rf.log)-1) < rf.nextIndex[i] || len(args.Entries) == 0 {
-								rf.mu.Unlock()
-								return
+							fmt.Printf("leader %v append server %v success start index %v time now %v \n", rf.me, i, args.PrevLogIndex, time.Now().UnixMilli())
+							matchIdx := args.PrevLogIndex + len(args.Entries)
+							if matchIdx > rf.matchIndex[i] {
+								rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
+								rf.nextIndex[i] = args.PrevLogIndex + len(args.Entries) + 1
 							}
+							rf.mu.Unlock()
+							return
 						} else {
 							index := -1
 							for i, e := range rf.log {
@@ -141,8 +148,17 @@ func (rf *Raft) appendLogRoutine(i int, start int) {
 							if index == -1 {
 								index = reply.ConflictIndex
 							}
-							rf.nextIndex[i] = index
+							if index < rf.nextIndex[i] {
+								rf.nextIndex[i] = index
+								fmt.Printf("leader %v append server %v failed set nextIndex = %v time now %v \n", rf.me, i, index, time.Now().UnixMilli())
+							} else {
+								rf.nextIndex[i]--
+							}
+							// fmt.Printf("leader %v append server %v failed set nextIndex = %v time now %v \n", rf.me, i, index, time.Now().UnixMilli())
 						}
+					} else if isInvalid {
+						rf.mu.Unlock()
+						return
 					}
 					rf.mu.Unlock()
 				case <-time.After(RpcTimeout):
@@ -153,50 +169,52 @@ func (rf *Raft) appendLogRoutine(i int, start int) {
 			}
 		} else if isValid && rf.raftToLogIndex(rf.nextIndex[i]) < 0 {
 			// should install snapshot
-			args := &InstallSnapshotArgs{
-				Term:              rf.currentTerm,
-				LeaderId:          rf.me,
-				LastIncludedIndex: rf.lastIncludedIndex,
-				LastIncludedTerm:  rf.lastIncludedTerm,
-				Data:              rf.latestSnapshot,
-			}
-			reply := &InstallSnapshotReply{}
-			replied := make(chan struct{}, 1)
-			rf.mu.Unlock()
-			go func(args *InstallSnapshotArgs, reply *InstallSnapshotReply, ch chan struct{}) {
-				rf.sendInstallSnapshot(i, args, reply)
-				replied <- struct{}{}
-			}(args, reply, replied)
-
-		loop2:
 			for {
-				select {
-				case <-replied:
-					rf.mu.Lock()
-					isOutdated := rf.currentTerm != args.Term || rf.role != Leader || rf.lastIncludedIndex != args.LastIncludedIndex
-					if !isOutdated {
-						if reply.Term > rf.currentTerm {
-							rf.role = Follower
-							rf.nextIndex = nil
-							rf.matchIndex = nil
-							rf.currentTerm = reply.Term
-							rf.persist()
-						} else {
-							if rf.lastIncludedIndex > rf.matchIndex[i] {
-								rf.nextIndex[i] = rf.lastIncludedIndex + 1
-								rf.matchIndex[i] = rf.lastIncludedIndex
-								fmt.Printf("leader %v install snapshot success, set server %v match index = %v\n", rf.me, i, rf.lastIncludedIndex)
+				args := &InstallSnapshotArgs{
+					Term:              rf.currentTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.lastIncludedIndex,
+					LastIncludedTerm:  rf.lastIncludedTerm,
+					Data:              rf.latestSnapshot,
+				}
+				reply := &InstallSnapshotReply{}
+				replied := make(chan struct{}, 1)
+				rf.mu.Unlock()
+				go func(args *InstallSnapshotArgs, reply *InstallSnapshotReply, ch chan struct{}) {
+					rf.sendInstallSnapshot(i, args, reply)
+					replied <- struct{}{}
+				}(args, reply, replied)
+
+			loop2:
+				for {
+					select {
+					case <-replied:
+						rf.mu.Lock()
+						isOutdated := rf.currentTerm != args.Term || rf.role != Leader || rf.lastIncludedIndex != args.LastIncludedIndex
+						if !isOutdated {
+							if reply.Term > rf.currentTerm {
+								rf.role = Follower
+								rf.nextIndex = nil
+								rf.matchIndex = nil
+								rf.currentTerm = reply.Term
+								rf.persist()
+							} else {
+								if rf.lastIncludedIndex > rf.matchIndex[i] {
+									rf.nextIndex[i] = rf.lastIncludedIndex + 1
+									rf.matchIndex[i] = rf.lastIncludedIndex
+									fmt.Printf("leader %v install snapshot success, set server %v match index = %v\n", rf.me, i, rf.lastIncludedIndex)
+								}
 							}
 						}
+						rf.mu.Unlock()
+						return
+					case <-time.After(RpcTimeout * 2):
+						break loop2
+					default:
+						time.Sleep(CheckInterval)
 					}
-					rf.mu.Unlock()
-				case <-time.After(RpcTimeout * 2):
-					break loop2
-				default:
-					time.Sleep(CheckInterval)
 				}
 			}
-			return
 		} else {
 			rf.mu.Unlock()
 			return

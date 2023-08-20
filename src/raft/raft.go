@@ -39,7 +39,7 @@ import (
 // other uses.
 const (
 	CheckInterval  = 10 * time.Millisecond
-	RpcTimeout     = 100 * time.Millisecond
+	RpcTimeout     = 150 * time.Millisecond
 	AppendInterval = 10 * time.Millisecond
 	RaftStartIndex = 1
 	RpcInterval    = 20 * time.Millisecond

@@ -54,7 +54,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.lastContact = time.Now()
 
-	if lastIdx == rf.lastIncludedIndex {
+	if lastIdx == rf.lastIncludedIndex && rf.lastIncludedIndex > 0 {
 		fmt.Printf("leader's %v prevIdx + log len = follower %v\n", args.LeaderId, rf.me)
 		args.PrevLogIndex = lastIdx
 		args.PrevLogTerm = args.Entries[len(args.Entries)-1].Term
@@ -70,13 +70,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// process RPC
 	// AE RPC step 2: check if entry match at prevLogIndex and prevLogTerm
 	if lastRaftIndex := rf.logToRaftIndex(len(rf.log) - 1); args.PrevLogIndex > lastRaftIndex {
-		// fmt.Printf("leader (me %v)'s preLogIndex %v out of my (me %v) log len (%v) range time (append log and immediately send hb)%v\n", args.LeaderId, args.PrevLogIndex, rf.me, lastRaftIndex+1, Timestamp())
+		fmt.Printf("leader (me %v)'s preLogIndex %v out of my (me %v) log len (%v) range time (append log and immediately send hb)%v\n", args.LeaderId, args.PrevLogIndex, rf.me, lastRaftIndex+1, Timestamp())
 		reply.ConflictIndex = lastRaftIndex + 1
 		return
 	} else if args.PrevLogIndex > rf.logToRaftIndex(0) {
 		logIndex := rf.raftToLogIndex(args.PrevLogIndex)
 		if e := rf.log[logIndex]; e.Term != args.PrevLogTerm {
-			// fmt.Printf("log conflict: leader %v me %v log index %v leader term %v my term %v time %v \n", args.LeaderId, rf.me, args.PrevLogIndex, e.Term, args.PrevLogTerm, Timestamp())
+			fmt.Printf("log conflict: leader %v me %v log index %v leader term %v my term %v time %v \n", args.LeaderId, rf.me, args.PrevLogIndex, e.Term, args.PrevLogTerm, Timestamp())
 			reply.ConflictTerm = e.Term
 			for i, entry := range rf.log {
 				if entry.Term == e.Term {
